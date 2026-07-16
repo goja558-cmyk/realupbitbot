@@ -84,6 +84,15 @@ def validate_universe() -> None:
 
 
 def _token(cfg: dict) -> str:
+    # 실전 봇이 발급·저장한 토큰이 아직 유효하면 재사용한다. 백테스트마다
+    # 새 토큰을 발급하면 KIS의 토큰 발급 제한/일시 오류에 불필요하게 걸린다.
+    token_file = BASE / "shared" / "kis_token.json"
+    try:
+        cached = json.loads(token_file.read_text(encoding="utf-8"))
+        if cached.get("token") and float(cached.get("expire", 0)) > time.time() + 60:
+            return cached["token"]
+    except (OSError, ValueError, TypeError):
+        pass
     app_key, app_secret = cfg.get("app_key"), cfg.get("app_secret")
     if not app_key or not app_secret:
         raise RuntimeError("sector_cfg.yaml의 app_key/app_secret이 필요합니다.")
@@ -92,7 +101,8 @@ def _token(cfg: dict) -> str:
         json={"grant_type": "client_credentials", "appkey": app_key, "appsecret": app_secret},
         timeout=15,
     )
-    r.raise_for_status()
+    if r.status_code >= 400:
+        raise RuntimeError(f"KIS 토큰 발급 HTTP {r.status_code}: {r.text[:500]}")
     token = r.json().get("access_token")
     if not token:
         raise RuntimeError(f"KIS 토큰 발급 실패: {r.text[:300]}")
