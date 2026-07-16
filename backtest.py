@@ -18,7 +18,7 @@ import json
 import os
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -551,9 +551,10 @@ def _quality(summary: dict) -> float:
 
 
 def walkforward(data: dict[str, list[dict]], train_start: str, train_end: str, test_start: str, test_end: str, top_k: int,
-                cash_defense: bool = False, gap_entry_block: bool = False):
+                cash_defense: bool = False, gap_entry_block: bool = False, fee_bps: float = 10.0):
     in_sample = []
-    for p in _parameter_candidates():
+    for candidate in _parameter_candidates():
+        p = replace(candidate, fee_bps=fee_bps)
         result, _, _ = simulate(data, p, train_start, train_end, cash_defense=cash_defense,
                                 gap_entry_block=gap_entry_block)
         result["selection_score"] = round(_quality(result), 4)
@@ -621,10 +622,11 @@ def main():
     if args.cmd == "walkforward":
         walkforward(data, start.strftime("%Y%m%d"), date.fromisoformat(args.train_end).strftime("%Y%m%d"),
                     date.fromisoformat(args.test_start).strftime("%Y%m%d"), end.strftime("%Y%m%d"), args.top_k,
-                    cash_defense=args.cash_defense, gap_entry_block=args.gap_entry_block)
+                    cash_defense=args.cash_defense, gap_entry_block=args.gap_entry_block, fee_bps=args.fee_bps)
         return
     summaries = []
-    for p in _parameter_candidates():
+    for candidate in _parameter_candidates():
+        p = replace(candidate, fee_bps=args.fee_bps)
         summary, _, _ = simulate(data, p, start.strftime("%Y%m%d"), end.strftime("%Y%m%d"))
         summaries.append(summary)
     summaries.sort(key=lambda x: (x["cagr_pct"] + x["mdd_pct"] * 0.5), reverse=True)
