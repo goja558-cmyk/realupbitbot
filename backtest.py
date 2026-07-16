@@ -30,6 +30,7 @@ CFG = BASE / "sector_cfg.yaml"
 DATA_DIR = BASE / "data" / "kis_daily"
 RESULT_DIR = BASE / "results" / "backtest"
 KOSPI_CACHE_CODE = "__KOSPI__"
+KOSPI200_ETF_CODE = "069500"  # KODEX 200: 국내 지수 전략의 실제 주문·백테스트 대상
 
 # 실거래 유니버스와 동일하다. 상장 전 날짜에는 CSV가 없으므로 자동 제외된다.
 UNIVERSE = {
@@ -250,6 +251,7 @@ def fetch_kospi(start: date, end: date, token: str, cfg: dict) -> int:
 def fetch_all(start: date, end: date) -> None:
     cfg, token = _load_cfg(), _token(_load_cfg())
     print(f"[KIS] KOSPI: {fetch_kospi(start, end, token, cfg)}개 일봉")
+    print(f"[KIS] {KOSPI200_ETF_CODE} KODEX 200: {fetch_code(KOSPI200_ETF_CODE, start, end, token, cfg)}개 일봉")
     for code, meta in UNIVERSE.items():
         n = fetch_code(code, start, end, token, cfg)
         print(f"[KIS] {code} {meta['name']}: {n}개 일봉")
@@ -543,6 +545,72 @@ def simulate(data: dict[str, list[dict]], p: Params, start: str, end: str, initi
     return summary, trades, curve
 
 
+def simulate_kospi200_trend(start: str, end: str, fee_bps: float = 30.0) -> tuple[dict, list[dict], list[dict]]:
+    """KOSPI200 ETF의 저회전율 추세·비중조절 전략.
+    신호는 전일 종가만 사용하고 매월 첫 거래일 시가에 체결한다.
+    200일선과 60일 수익률로 85%/50%/15%의 세 단계 노출을 결정한다.
+    """
+    rows = _read_csv(KOSPI200_ETF_CODE)
+    by_date = {r["date"]: i for i, r in enumerate(rows)}
+    calendar = [r["date"] for r in rows if start <= r["date"] <= end]
+    if len(calendar) < 2:
+        raise RuntimeError(f"{KOSPI200_ETF_CODE} 일봉이 부족합니다. 먼저 index-fetch를 실행하세요.")
+    cash, qty, fee = 1_000_000.0, 0, fee_bps / 10_000
+    trades, curve, peak, max_dd = [], [], cash, 0.0
+    exposures = {"risk_on": 0, "neutral": 0, "risk_off": 0}
+    for n, d in enumerate(calendar):
+        i, bar = by_date[d], rows[by_date[d]]
+        dt = datetime.strptime(d, "%Y%m%d").date()
+        # 전일 확정 데이터로만 결정. 첫 거래일에 월간 비중을 맞춘다.
+        if dt.day <= 7 and n > 0 and i >= 200:
+            prev = rows[i - 1]
+            ma200 = sum(r["close"] for r in rows[i - 200:i]) / 200
+            ret60 = (prev["close"] / rows[i - 61]["close"] - 1) * 100 if i >= 61 else 0.0
+            if prev["close"] >= ma200 and ret60 > 0:
+                target, label = 0.85, "risk_on"
+            elif prev["close"] >= ma200 or ret60 > 0:
+                target, label = 0.50, "neutral"
+            else:
+                target, label = 0.15, "risk_off"
+            exposures[label] += 1
+            equity_open = cash + qty * bar["open"]
+            desired = int(equity_open * target / (bar["open"] * (1 + fee)))
+            change = desired - qty
+            if change > 0:
+                cost = change * bar["open"] * (1 + fee)
+                if cost <= cash:
+                    cash -= cost; qty += change
+                    trades.append({"date": d, "code": KOSPI200_ETF_CODE, "name": "KODEX 200", "side": "BUY",
+                                   "price": round(bar["open"], 2), "qty": change, "reason": label, "pnl_pct": ""})
+            elif change < 0:
+                sold = -change
+                cash += sold * bar["open"] * (1 - fee); qty -= sold
+                trades.append({"date": d, "code": KOSPI200_ETF_CODE, "name": "KODEX 200", "side": "SELL",
+                               "price": round(bar["open"], 2), "qty": sold, "reason": label, "pnl_pct": ""})
+        equity = cash + qty * bar["close"]
+        peak = max(peak, equity)
+        max_dd = min(max_dd, (equity / peak - 1) * 100)
+        curve.append({"date": d, "equity": round(equity, 2), "cash": round(cash, 2),
+                      "drawdown_pct": round((equity / peak - 1) * 100, 3), "holdings": KOSPI200_ETF_CODE if qty else ""})
+    first, last = rows[by_date[calendar[0]]], rows[by_date[calendar[-1]]]
+    buy_hold = 1_000_000 / (first["open"] * (1 + fee))
+    bh_final = buy_hold * last["close"]
+    years = max(1 / 252, len(calendar) / 252)
+    gross = sum(t["price"] * t["qty"] for t in trades)
+    final = curve[-1]["equity"]
+    summary = {"strategy": "kospi200_trend_85_50_15", "start": start, "end": end,
+               "trading_days": len(calendar), "initial_cash": 1_000_000, "final_equity": round(final, 2),
+               "total_return_pct": round((final / 1_000_000 - 1) * 100, 3),
+               "cagr_pct": round(((final / 1_000_000) ** (1 / years) - 1) * 100, 3), "mdd_pct": round(max_dd, 3),
+               "trade_count": len(trades), "turnover_pct_initial": round(gross / 1_000_000 * 100, 2),
+               "estimated_cost_krw": round(gross * fee, 2), "fee_bps": fee_bps,
+               "buy_hold_total_return_pct": round((bh_final / 1_000_000 - 1) * 100, 3),
+               "buy_hold_cagr_pct": round(((bh_final / 1_000_000) ** (1 / years) - 1) * 100, 3),
+               "exposure_rebalances": exposures,
+               "limitations": "나스닥·대장주 필터, 배당 재투자, 장중 킬스위치는 미포함. 전일 종가 신호와 다음 거래일 시가 체결만 사용."}
+    return summary, trades, curve
+
+
 def _save_result(summary, trades, curve, prefix="run"):
     RESULT_DIR.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -643,7 +711,7 @@ def rolling_walkforward(data: dict[str, list[dict]], start: date, end: date, tra
 def main():
     ap = argparse.ArgumentParser(description="KIS 일봉 전용 백테스트 — 주문 API 미사용")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name in ("fetch", "run", "grid", "walkforward", "rolling"):
+    for name in ("fetch", "run", "grid", "walkforward", "rolling", "index-fetch", "index-run"):
         s = sub.add_parser(name)
         s.add_argument("--start", default="2023-01-01")
         s.add_argument("--end", default=date.today().isoformat())
@@ -675,11 +743,19 @@ def main():
             s.add_argument("--trail-gap", type=float, default=2.0)
     args = ap.parse_args()
     global UNIVERSE
-    if args.universe == "historical":
+    if args.cmd not in ("index-fetch", "index-run") and args.universe == "historical":
         UNIVERSE = HISTORICAL_UNIVERSE
-    else:
+    elif args.cmd not in ("index-fetch", "index-run"):
         validate_universe()
     start, end = date.fromisoformat(args.start), date.fromisoformat(args.end)
+    if args.cmd == "index-fetch":
+        cfg, token = _load_cfg(), _token(_load_cfg())
+        print(f"[KIS] {KOSPI200_ETF_CODE} KODEX 200: {fetch_code(KOSPI200_ETF_CODE, start, end, token, cfg)}개 일봉")
+        return
+    if args.cmd == "index-run":
+        _save_result(*simulate_kospi200_trend(start.strftime("%Y%m%d"), end.strftime("%Y%m%d"), args.fee_bps),
+                     prefix="kospi200")
+        return
     if args.cmd == "fetch":
         fetch_all(start, end); return
     data = {c: _read_csv(c) for c in UNIVERSE}
