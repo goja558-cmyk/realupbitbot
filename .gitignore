@@ -1,0 +1,20 @@
+# 비밀값·계좌 상태: 공개 저장소에 절대 커밋하지 않는다.
+sector_cfg.yaml
+manager_cfg.yaml
+*_cfg.yaml
+sector_state.json
+shared/
+logs/
+data/
+results/
+*.log
+*.pid
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 운영체제/편집기 파일
+.DS_Store
+Thumbs.db
+.vscode/
