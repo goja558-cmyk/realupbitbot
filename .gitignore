@@ -7,6 +7,10 @@ shared/
 logs/
 data/
 results/
+!results/
+!results/us_backtest/
+!results/us_backtest/*.csv
+!results/us_backtest/*.json
 *.log
 *.pid
 __pycache__/
