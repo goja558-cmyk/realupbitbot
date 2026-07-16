@@ -11,6 +11,9 @@ results/
 !results/us_backtest/
 !results/us_backtest/*.csv
 !results/us_backtest/*.json
+!results/kr_stock_research/
+!results/kr_stock_research/*.csv
+!results/kr_stock_research/*.json
 *.log
 *.pid
 __pycache__/
