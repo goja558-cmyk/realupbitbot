@@ -226,12 +226,11 @@ def _select(data: dict[str, list[dict]], day: str, p: Params, cooldown: dict[str
         if idx is None:
             continue
         ret20 = _ret(rows, idx, 20)
-        # 실전 is_cooldown: 20일 수익률이 양전환하면 조기 해제, 아니면 만료일까지 제외
+        # 손절/급락 쿨다운은 기간 동안 엄격하게 유지한다. 반등만으로 조기 해제하면
+        # 손절 직후 재진입 휘핑쏘가 생기므로 실전 기본 정책과 동일하게 금지한다.
         until = cooldown.get(code)
         if until:
-            if ret20 > 0:
-                del cooldown[code]
-            elif signal_day <= until:
+            if signal_day <= until:
                 continue
             else:
                 del cooldown[code]

@@ -119,6 +119,9 @@ RESUME_VOL_RATIO    =  1.1   # 자동 복귀 거래량 비율 (1.2→1.1 완화)
 OVERHEAT_PCT     = 15.0       # 과열 필터: 5일 수익률 초과 시 비중 축소 (제외→축소)
 
 COOLDOWN_DAYS    = 14         # 섹터 쿨다운 일수
+# 손절 뒤에는 반등 신호가 있어도 쿨다운 기간을 지킨다. 조기 재진입은 휘핑쏘를
+# 키우므로, 명시적으로 정책을 바꾸기 전까지 허용하지 않는다.
+COOLDOWN_EARLY_RELEASE = False
 
 TRADE_START_H    = 9
 TRADE_START_M    = 10
@@ -2237,8 +2240,8 @@ def is_cooldown(code, closes=None):
     until = cooldown_list.get(code)
     if not until:
         return False
-    # 조건부 해제: 20일 수익률이 회복됐으면 쿨다운 해제
-    if closes is not None and _ret_n(closes, 20) > 0:
+    # 기본값은 엄격한 기간 쿨다운이다. 필요할 때만 명시적으로 조기 해제를 켠다.
+    if COOLDOWN_EARLY_RELEASE and closes is not None and _ret_n(closes, 20) > 0:
         del cooldown_list[code]
         cprint(f"[쿨다운 해제] {code} 20일 수익률 회복 → 편입 허용", Fore.GREEN)
         return False
