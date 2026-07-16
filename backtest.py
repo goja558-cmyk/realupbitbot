@@ -321,7 +321,8 @@ def _score_on_day(data: dict[str, list[dict]], code: str, day: str, p: Params) -
 
 
 def simulate(data: dict[str, list[dict]], p: Params, start: str, end: str, initial_cash=1_000_000,
-             cash_defense: bool = False, gap_entry_block: bool = False) -> tuple[dict, list[dict], list[dict]]:
+             cash_defense: bool = False, gap_entry_block: bool = False,
+             rebalance_mode: str = "adaptive") -> tuple[dict, list[dict], list[dict]]:
     """전일 종가 신호 → 당일 시가 체결. 월초 전면, 매주 월요일 하위 교체 대신
     매주 월요일 목표 바스켓으로 조정한다. 방어/인버스는 별도 검증 대상이라 포함하지 않는다."""
     calendar = sorted({r["date"] for rows in data.values() for r in rows if start <= r["date"] <= end})
@@ -335,7 +336,8 @@ def simulate(data: dict[str, list[dict]], p: Params, start: str, end: str, initi
     risk_lock_active = False
     defense_events = {"daily_kill": 0, "mdd_kill": 0, "kospi_defense": 0, "cash_defense_days": 0,
                       "gap_entry_block_days": 0}
-    kospi = {r["date"]: r for r in _read_csv(KOSPI_CACHE_CODE)} if (cash_defense or gap_entry_block) else {}
+    kospi_benchmark = {r["date"]: r for r in _read_csv(KOSPI_CACHE_CODE)}
+    kospi = kospi_benchmark if (cash_defense or gap_entry_block) else {}
     fee = p.fee_bps / 10_000
 
     def sell(code, bar, reason):
@@ -406,14 +408,20 @@ def simulate(data: dict[str, list[dict]], p: Params, start: str, end: str, initi
         if entry_blocked and dt.weekday() == 0:
             defense_events["gap_entry_block_days"] += 1
 
-        if not defense_active and not entry_blocked and (dt.weekday() == 0 or resume_rebalance) and n > 0:
+        is_monthly = dt.day <= 7
+        is_quarterly = is_monthly and dt.month in (1, 4, 7, 10)
+        scheduled = (dt.weekday() == 0 and n > 0 and (
+            rebalance_mode == "adaptive" or
+            (rebalance_mode == "monthly" and is_monthly) or
+            (rebalance_mode == "quarterly" and is_quarterly)
+        ))
+        if not defense_active and not entry_blocked and (scheduled or resume_rebalance) and n > 0:
             target, overheat = _select(data, calendar[n - 1], p, cooldown)
             current = list(pos)
-            is_monthly = dt.day <= 7
-            if is_monthly or resume_rebalance:
+            if rebalance_mode != "adaptive" or is_monthly or resume_rebalance:
                 desired = target
                 to_sell = [c for c in current if c not in desired]
-                reason = "defense_resume" if resume_rebalance else "monthly_rebalance"
+                reason = "defense_resume" if resume_rebalance else f"{rebalance_mode}_rebalance"
             else:
                 desired = list(current)
                 held_scores = sorted(
@@ -507,6 +515,18 @@ def simulate(data: dict[str, list[dict]], p: Params, start: str, end: str, initi
             if code in stop_dates and (trade_day - stop_dates[code]).days <= 14:
                 stop_reentries += 1
     gross_notional = sum(float(t["price"]) * int(t["qty"]) for t in trades)
+    benchmark_rows = [kospi_benchmark[d] for d in calendar if d in kospi_benchmark]
+    benchmark = {}
+    if len(benchmark_rows) >= 2:
+        b_start, b_final = benchmark_rows[0]["close"], benchmark_rows[-1]["close"]
+        b_peak, b_mdd = b_start, 0.0
+        for bar in benchmark_rows:
+            b_peak = max(b_peak, bar["close"])
+            b_mdd = min(b_mdd, (bar["close"] / b_peak - 1) * 100)
+        b_years = max(1 / 252, len(benchmark_rows) / 252)
+        benchmark = {"kospi_price_return_pct": round((b_final / b_start - 1) * 100, 3),
+                     "kospi_price_cagr_pct": round(((b_final / b_start) ** (1 / b_years) - 1) * 100, 3),
+                     "kospi_price_mdd_pct": round(b_mdd, 3)}
     summary = {"universe": "historical" if set(UNIVERSE) == set(HISTORICAL_UNIVERSE) else "live",
                "start": start, "end": end, "trading_days": len(calendar), "initial_cash": initial_cash,
                "final_equity": round(final, 2), "total_return_pct": round((final / initial_cash - 1) * 100, 3),
@@ -517,7 +537,8 @@ def simulate(data: dict[str, list[dict]], p: Params, start: str, end: str, initi
                "estimated_cost_20bps_krw": round(gross_notional * 0.002, 2),
                "estimated_cost_30bps_krw": round(gross_notional * 0.003, 2),
                "reentry_within_14d": quick_reentries, "stop_reentry_within_14d": stop_reentries,
-               "cash_defense": cash_defense, "gap_entry_block": gap_entry_block, **defense_events,
+               "cash_defense": cash_defense, "gap_entry_block": gap_entry_block,
+               "rebalance_mode": rebalance_mode, **benchmark, **defense_events,
                "limitations": "일봉 기반: 장중 고가/저가 순서는 알 수 없어 트레일은 전일까지 확정된 고점만 사용. cash_defense는 킬스위치/MDD/KOSPI 디펜스를 종가 전량 현금화와 다음 월요일 재진입으로 근사한다. 인버스·장중 체결·호가 스프레드는 미포함. 현 유니버스의 신규 상장 종목 때문에 2025년 이전 동일 유니버스 검증은 불가.", **p.__dict__}
     return summary, trades, curve
 
@@ -645,6 +666,13 @@ def main():
                            help="Include daily cash-defense approximation")
             s.add_argument("--gap-entry-block", action="store_true",
                            help="Block Monday rebalancing after a KOSPI gap down")
+            s.add_argument("--rebalance-mode", choices=("adaptive", "monthly", "quarterly"), default="adaptive")
+            s.add_argument("--short", type=int, default=20)
+            s.add_argument("--long", type=int, default=60)
+            s.add_argument("--top-n", type=int, default=5)
+            s.add_argument("--stop-loss", type=float, default=-5.0)
+            s.add_argument("--trail-start", type=float, default=4.0)
+            s.add_argument("--trail-gap", type=float, default=2.0)
     args = ap.parse_args()
     global UNIVERSE
     if args.universe == "historical":
@@ -659,8 +687,13 @@ def main():
     if missing:
         raise SystemExit("데이터 없음: " + ", ".join(missing) + "\n먼저: python3 backtest.py fetch --start " + args.start)
     if args.cmd == "run":
-        _save_result(*simulate(data, Params(fee_bps=args.fee_bps), start.strftime("%Y%m%d"), end.strftime("%Y%m%d"),
-                               cash_defense=args.cash_defense, gap_entry_block=args.gap_entry_block))
+        p = Params(short=args.short, long=args.long, top_n=args.top_n, stop_loss=args.stop_loss,
+                   trail_start=args.trail_start, trail_gap=args.trail_gap, fee_bps=args.fee_bps)
+        if p.short >= p.long or p.top_n < 1:
+            raise SystemExit("--short는 --long보다 작고, --top-n은 1 이상이어야 합니다.")
+        _save_result(*simulate(data, p, start.strftime("%Y%m%d"), end.strftime("%Y%m%d"),
+                               cash_defense=args.cash_defense, gap_entry_block=args.gap_entry_block,
+                               rebalance_mode=args.rebalance_mode))
         return
     if args.cmd == "walkforward":
         walkforward(data, start.strftime("%Y%m%d"), date.fromisoformat(args.train_end).strftime("%Y%m%d"),
