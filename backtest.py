@@ -44,6 +44,21 @@ UNIVERSE = {
     "227560": {"name": "TIGER 200 생활소비재", "tag": "방어", "max_weight": .15},
 }
 
+# 2018년부터 존재한 국내 섹터 ETF로 구성한 별도 검증 유니버스.
+# 현재 실전 종목을 과거 가격으로 소급하지 않으며, 장기 하락장에 대한 "전략 클래스" 검증에만 쓴다.
+# 삼성자산운용 ETF 상품자료의 상장일을 기준으로 골랐고, 실전 성과와 절대 합산하지 않는다.
+HISTORICAL_UNIVERSE = {
+    "091160": {"name": "KODEX 반도체", "tag": "성장", "max_weight": .20},
+    "102960": {"name": "KODEX 기계장비", "tag": "모멘텀", "max_weight": .15},
+    "117680": {"name": "KODEX 철강", "tag": "모멘텀", "max_weight": .15},
+    "140710": {"name": "KODEX 운송", "tag": "모멘텀", "max_weight": .15},
+    "266420": {"name": "KODEX 헬스케어", "tag": "성장", "max_weight": .15},
+    "305720": {"name": "KODEX 2차전지산업", "tag": "고위험", "max_weight": .05},
+    "091170": {"name": "KODEX 은행", "tag": "방어", "max_weight": .15},
+    "266390": {"name": "KODEX 경기소비재", "tag": "방어", "max_weight": .10},
+    "266410": {"name": "KODEX 필수소비재", "tag": "방어", "max_weight": .10},
+}
+
 
 @dataclass(frozen=True)
 class Params:
@@ -482,7 +497,8 @@ def simulate(data: dict[str, list[dict]], p: Params, start: str, end: str, initi
             if code in stop_dates and (trade_day - stop_dates[code]).days <= 14:
                 stop_reentries += 1
     gross_notional = sum(float(t["price"]) * int(t["qty"]) for t in trades)
-    summary = {"start": start, "end": end, "trading_days": len(calendar), "initial_cash": initial_cash,
+    summary = {"universe": "historical" if set(UNIVERSE) == set(HISTORICAL_UNIVERSE) else "live",
+               "start": start, "end": end, "trading_days": len(calendar), "initial_cash": initial_cash,
                "final_equity": round(final, 2), "total_return_pct": round((final / initial_cash - 1) * 100, 3),
                "cagr_pct": round(((final / initial_cash) ** (1 / years) - 1) * 100, 3), "mdd_pct": round(max_dd, 3),
                "trade_count": len(trades), "turnover_pct_initial": round(gross_notional / initial_cash * 100, 2),
@@ -559,6 +575,8 @@ def main():
         s = sub.add_parser(name)
         s.add_argument("--start", default="2023-01-01")
         s.add_argument("--end", default=date.today().isoformat())
+        s.add_argument("--universe", choices=("live", "historical"), default="live",
+                       help="live: 실전 ETF / historical: 2018년부터 존재한 섹터 ETF 검증군")
         s.add_argument("--fee-bps", type=float, default=10.0, help="편도 비용+슬리피지 가정 (기본 10bp)")
         if name == "walkforward":
             s.add_argument("--cash-defense", action="store_true",
@@ -574,7 +592,11 @@ def main():
             s.add_argument("--gap-entry-block", action="store_true",
                            help="Block Monday rebalancing after a KOSPI gap down")
     args = ap.parse_args()
-    validate_universe()
+    global UNIVERSE
+    if args.universe == "historical":
+        UNIVERSE = HISTORICAL_UNIVERSE
+    else:
+        validate_universe()
     start, end = date.fromisoformat(args.start), date.fromisoformat(args.end)
     if args.cmd == "fetch":
         fetch_all(start, end); return
