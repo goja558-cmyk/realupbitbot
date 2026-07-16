@@ -136,7 +136,9 @@ def fetch_code(code: str, start: date, end: date, token: str, cfg: dict) -> int:
     }
     cursor = end
     while cursor >= start:
-        begin = max(start, cursor - timedelta(days=95))
+        # KIS 일봉 응답은 계정/종목에 따라 약 30거래일까지만 돌아올 수 있다.
+        # 실전 봇과 동일하게 50일 단위로 요청해야 각 응답 구간이 끊기지 않는다.
+        begin = max(start, cursor - timedelta(days=50))
         r = requests.get(
             "https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice",
             headers=headers,
