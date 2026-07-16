@@ -53,3 +53,19 @@ python3 backtest.py run --start 2023-01-01
 ```
 
 `grid` 결과는 워크포워드 검증 전 실전 파라미터로 사용하지 마세요.
+## Nasdaq US-stock research backtest
+
+`us_stock_backtest.py` is a separate, read-only research tool. It does not
+share live order code with `sector_bot.py` and never calls an order endpoint.
+It fetches daily overseas-stock prices from KIS, caches them under
+`data/us_daily/`, and compares a low-turnover monthly Nasdaq large-cap rule
+with QQQ buy-and-hold.
+
+```bash
+source .venv/bin/activate
+python3 us_stock_backtest.py fetch --start 2015-01-01
+python3 us_stock_backtest.py run --start 2018-01-01 --end 2026-07-15 --fee-bps 20
+```
+
+The fixed large-cap universe has survivorship bias. Treat results only as a
+first API/strategy sanity check, not as evidence for live trading.
