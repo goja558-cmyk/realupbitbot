@@ -103,6 +103,7 @@ KILL_DAY_LOSS    = -4.0       # 킬 스위치 일일 손실 (-3%→-4% 완화)
 D1_KOSPI_PCT   = -2.0   # NORMAL→DEFENSE_1 코스피 조건 (-1.5%→-2% 완화)
 D1_PF_PCT      = -3.0   # NORMAL→DEFENSE_1 포트폴리오 수익률 조건 (-2%→-3% 완화)
 NO_BUY_KOSPI_PCT = -1.5 # 장초반 코스피 급락 시 신규 진입 보류 (기존 보유는 유지)
+ENABLE_KOSPI_ENTRY_BLOCK = False  # 백테스트 성과 개선 전까지 자동 적용하지 않는다.
 D2_KOSPI_PCT   = -2.0   # DEFENSE_1→2 코스피 조건
 D2_CONSEC      = 2      # DEFENSE_1→2 연속하락일 조건
 D3_KOSPI_PCT   = -3.0   # DEFENSE_2→3 코스피 조건
@@ -2755,7 +2756,7 @@ def _do_rebalance():
     global portfolio
 
     # 급락일에는 리밸런싱 매도·매수를 모두 건너뛴다. 기존 포지션은 별도 손절/트레일링만 적용된다.
-    if is_kospi_no_trade():
+    if ENABLE_KOSPI_ENTRY_BLOCK and is_kospi_no_trade():
         send_msg(f"⚠️ 코스피 급락({get_kospi_change_pct():+.1f}%) — 오늘 신규 진입을 보류합니다.", force=True)
         return
 
