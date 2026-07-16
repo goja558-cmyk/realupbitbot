@@ -29,6 +29,7 @@ BASE = Path(__file__).resolve().parent
 CFG = BASE / "sector_cfg.yaml"
 DATA_DIR = BASE / "data" / "kis_daily"
 RESULT_DIR = BASE / "results" / "backtest"
+KOSPI_CACHE_CODE = "__KOSPI__"
 
 # 실거래 유니버스와 동일하다. 상장 전 날짜에는 CSV가 없으므로 자동 제외된다.
 UNIVERSE = {
@@ -194,8 +195,46 @@ def fetch_code(code: str, start: date, end: date, token: str, cfg: dict) -> int:
     return len(old)
 
 
+def fetch_kospi(start: date, end: date, token: str, cfg: dict) -> int:
+    """실전 대피 규칙 검증용 KOSPI 일봉을 KIS 지수 차트 API에서 받는다."""
+    old = {r["date"]: r for r in _read_csv(KOSPI_CACHE_CODE)}
+    headers = {"content-type": "application/json; charset=utf-8", "authorization": f"Bearer {token}",
+               "appkey": cfg["app_key"], "appsecret": cfg["app_secret"], "tr_id": "FHKUP03500100"}
+    cursor = end
+    while cursor >= start:
+        begin = max(start, cursor - timedelta(days=50))
+        r = requests.get(
+            "https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/quotations/inquire-daily-indexchartprice",
+            headers=headers,
+            params={"fid_cond_mrkt_div_code": "U", "fid_input_iscd": "0001",
+                    "fid_input_date_1": begin.strftime("%Y%m%d"), "fid_input_date_2": cursor.strftime("%Y%m%d"),
+                    "fid_period_div_code": "D"}, timeout=20,
+        )
+        if r.status_code >= 400:
+            raise RuntimeError(f"KOSPI KIS HTTP {r.status_code}: {r.text[:300]}")
+        payload = r.json()
+        rows = payload.get("output2") or payload.get("output") or []
+        for x in rows:
+            try:
+                d = x.get("stck_bsop_date") or x.get("bsop_date")
+                close = float(x.get("bstp_nmix_clpr") or x.get("bstp_nmix_prpr") or x.get("stck_clpr") or 0)
+                if d and close > 0:
+                    old[d] = {"date": d, "open": float(x.get("bstp_nmix_oprc") or close),
+                              "high": float(x.get("bstp_nmix_hgpr") or close), "low": float(x.get("bstp_nmix_lwpr") or close),
+                              "close": close, "value": float(x.get("acml_vol") or 0)}
+            except (TypeError, ValueError):
+                pass
+        cursor = begin - timedelta(days=1)
+        time.sleep(0.22)
+    _write_csv(KOSPI_CACHE_CODE, list(old.values()))
+    if not old:
+        raise RuntimeError("KOSPI 일봉이 0개입니다. KIS 지수 차트 권한/응답을 확인하세요.")
+    return len(old)
+
+
 def fetch_all(start: date, end: date) -> None:
     cfg, token = _load_cfg(), _token(_load_cfg())
+    print(f"[KIS] KOSPI: {fetch_kospi(start, end, token, cfg)}개 일봉")
     for code, meta in UNIVERSE.items():
         n = fetch_code(code, start, end, token, cfg)
         print(f"[KIS] {code} {meta['name']}: {n}개 일봉")
@@ -266,7 +305,8 @@ def _score_on_day(data: dict[str, list[dict]], code: str, day: str, p: Params) -
     return _score(rows, idx, p) if idx is not None else None
 
 
-def simulate(data: dict[str, list[dict]], p: Params, start: str, end: str, initial_cash=1_000_000) -> tuple[dict, list[dict], list[dict]]:
+def simulate(data: dict[str, list[dict]], p: Params, start: str, end: str, initial_cash=1_000_000,
+             cash_defense: bool = False) -> tuple[dict, list[dict], list[dict]]:
     """전일 종가 신호 → 당일 시가 체결. 월초 전면, 매주 월요일 하위 교체 대신
     매주 월요일 목표 바스켓으로 조정한다. 방어/인버스는 별도 검증 대상이라 포함하지 않는다."""
     calendar = sorted({r["date"] for rows in data.values() for r in rows if start <= r["date"] <= end})
@@ -275,6 +315,10 @@ def simulate(data: dict[str, list[dict]], p: Params, start: str, end: str, initi
     cooldown = {}
     last_close = {}
     peak, max_dd = cash, 0.0
+    prior_equity = cash
+    defense_active = False
+    defense_events = {"daily_kill": 0, "mdd_kill": 0, "kospi_defense": 0, "cash_defense_days": 0}
+    kospi = {r["date"]: r for r in _read_csv(KOSPI_CACHE_CODE)} if cash_defense else {}
     fee = p.fee_bps / 10_000
 
     def sell(code, bar, reason):
@@ -315,7 +359,20 @@ def simulate(data: dict[str, list[dict]], p: Params, start: str, end: str, initi
         # 실전 스케줄과 동일하게 첫째 월요일은 전체 교체, 나머지 월요일은 하위 절반만
         # (후보와의 점수차 2% 이상일 때) 교체한다. 이전 버전의 매주 전체 교체는 회전율을
         # 과장해 471건이라는 결과를 만들 수 있었다.
-        if dt.weekday() == 0 and n > 0:
+        if defense_active:
+            defense_events["cash_defense_days"] += 1
+            # KOSPI 회복을 확인한 뒤 다음 월요일에만 재진입한다 (일봉 기반 보수적 근사).
+            k = kospi.get(calendar[n - 1]) if n else None
+            k5 = [kospi.get(calendar[i]) for i in range(max(0, n - 5), n) if kospi.get(calendar[i])]
+            if k and len(k5) >= 5:
+                ma5 = sum(x["close"] for x in k5) / len(k5)
+                avg_value = sum(x["value"] for x in k5) / len(k5)
+                prev_close = k5[-2]["close"] if len(k5) >= 2 else k["close"]
+                kospi_return = (k["close"] / prev_close - 1) * 100 if prev_close else 0
+                if dt.weekday() == 0 and kospi_return >= 0.5 and k["close"] >= ma5 and (not avg_value or k["value"] >= avg_value * 1.1):
+                    defense_active = False
+
+        if not defense_active and dt.weekday() == 0 and n > 0:
             target, overheat = _select(data, calendar[n - 1], p, cooldown)
             current = list(pos)
             is_monthly = dt.day <= 7
@@ -365,9 +422,39 @@ def simulate(data: dict[str, list[dict]], p: Params, start: str, end: str, initi
             if bar:
                 last_close[c] = bar["close"]
         equity = cash + sum(q * (bars[c]["close"] if bars.get(c) else last_close.get(c, entry)) for c, (q, entry, _) in pos.items())
+        # 일봉에서는 장중 트리거 시점과 체결가를 알 수 없으므로 종가 전량 현금화만 근사한다.
+        dd_before_exit = (equity / peak - 1) * 100 if peak else 0.0
+        daily_return = (equity / prior_equity - 1) * 100 if prior_equity else 0.0
+        k = kospi.get(d)
+        kospi_return = 0.0
+        if k and n:
+            prev_k = kospi.get(calendar[n - 1])
+            if prev_k and prev_k["close"]:
+                kospi_return = (k["close"] / prev_k["close"] - 1) * 100
+        trigger = ""
+        if cash_defense and pos:
+            if daily_return <= -4.0:
+                trigger = "daily_kill"
+            elif dd_before_exit <= -10.0:
+                trigger = "mdd_kill"
+            elif kospi_return <= -2.0 and daily_return <= -3.0:
+                trigger = "kospi_defense"
+        if trigger:
+            for code, (q, entry, _) in list(pos.items()):
+                bar = bars.get(code)
+                px = bar["close"] if bar else last_close.get(code, entry)
+                cash += q * px * (1 - fee)
+                trades.append({"date": d, "code": code, "name": UNIVERSE[code]["name"], "side": "SELL",
+                               "price": round(px, 2), "qty": q, "reason": trigger,
+                               "pnl_pct": round((px / entry - 1) * 100 - p.fee_bps / 100, 3)})
+                pos.pop(code)
+            equity = cash
+            defense_active = True
+            defense_events[trigger] += 1
         peak = max(peak, equity)
         max_dd = min(max_dd, (equity / peak - 1) * 100)
         curve.append({"date": d, "equity": round(equity, 2), "cash": round(cash, 2), "drawdown_pct": round((equity / peak - 1) * 100, 3), "holdings": ";".join(sorted(pos))})
+        prior_equity = equity
 
     years = max(1 / 252, len(calendar) / 252)
     final = curve[-1]["equity"] if curve else initial_cash
@@ -393,7 +480,8 @@ def simulate(data: dict[str, list[dict]], p: Params, start: str, end: str, initi
                "estimated_cost_20bps_krw": round(gross_notional * 0.002, 2),
                "estimated_cost_30bps_krw": round(gross_notional * 0.003, 2),
                "reentry_within_14d": quick_reentries, "stop_reentry_within_14d": stop_reentries,
-               "limitations": "일봉 기반: 장중 고가/저가 순서는 알 수 없어 트레일은 전일까지 확정된 고점만 사용. 호가 스프레드와 KOSPI 방어/인버스는 미포함. 현 유니버스의 신규 상장 종목 때문에 2025년 이전 동일 유니버스 검증은 불가.", **p.__dict__}
+               "cash_defense": cash_defense, **defense_events,
+               "limitations": "일봉 기반: 장중 고가/저가 순서는 알 수 없어 트레일은 전일까지 확정된 고점만 사용. cash_defense는 킬스위치/MDD/KOSPI 디펜스를 종가 전량 현금화와 다음 월요일 재진입으로 근사한다. 인버스·장중 체결·호가 스프레드는 미포함. 현 유니버스의 신규 상장 종목 때문에 2025년 이전 동일 유니버스 검증은 불가.", **p.__dict__}
     return summary, trades, curve
 
 
@@ -425,16 +513,17 @@ def _quality(summary: dict) -> float:
     return summary["cagr_pct"] / max(abs(summary["mdd_pct"]), 1.0)
 
 
-def walkforward(data: dict[str, list[dict]], train_start: str, train_end: str, test_start: str, test_end: str, top_k: int):
+def walkforward(data: dict[str, list[dict]], train_start: str, train_end: str, test_start: str, test_end: str, top_k: int,
+                cash_defense: bool = False):
     in_sample = []
     for p in _parameter_candidates():
-        result, _, _ = simulate(data, p, train_start, train_end)
+        result, _, _ = simulate(data, p, train_start, train_end, cash_defense=cash_defense)
         result["selection_score"] = round(_quality(result), 4)
         in_sample.append((result, p))
     in_sample.sort(key=lambda x: x[0]["selection_score"], reverse=True)
     rows = []
     for rank, (ins, p) in enumerate(in_sample[:top_k], 1):
-        oos, _, _ = simulate(data, p, test_start, test_end)
+        oos, _, _ = simulate(data, p, test_start, test_end, cash_defense=cash_defense)
         rows.append({
             "rank_in_sample": rank, "selection_score": ins["selection_score"],
             "is_cagr_pct": ins["cagr_pct"], "is_mdd_pct": ins["mdd_pct"], "is_trade_count": ins["trade_count"],
@@ -459,9 +548,14 @@ def main():
         s.add_argument("--end", default=date.today().isoformat())
         s.add_argument("--fee-bps", type=float, default=10.0, help="편도 비용+슬리피지 가정 (기본 10bp)")
         if name == "walkforward":
+            s.add_argument("--cash-defense", action="store_true",
+                           help="Include daily cash-defense approximation")
             s.add_argument("--train-end", default="2025-12-31")
             s.add_argument("--test-start", default="2026-01-01")
             s.add_argument("--top-k", type=int, default=5)
+        elif name == "run":
+            s.add_argument("--cash-defense", action="store_true",
+                           help="Include daily cash-defense approximation")
     args = ap.parse_args()
     validate_universe()
     start, end = date.fromisoformat(args.start), date.fromisoformat(args.end)
@@ -472,11 +566,13 @@ def main():
     if missing:
         raise SystemExit("데이터 없음: " + ", ".join(missing) + "\n먼저: python3 backtest.py fetch --start " + args.start)
     if args.cmd == "run":
-        _save_result(*simulate(data, Params(fee_bps=args.fee_bps), start.strftime("%Y%m%d"), end.strftime("%Y%m%d")))
+        _save_result(*simulate(data, Params(fee_bps=args.fee_bps), start.strftime("%Y%m%d"), end.strftime("%Y%m%d"),
+                               cash_defense=args.cash_defense))
         return
     if args.cmd == "walkforward":
         walkforward(data, start.strftime("%Y%m%d"), date.fromisoformat(args.train_end).strftime("%Y%m%d"),
-                    date.fromisoformat(args.test_start).strftime("%Y%m%d"), end.strftime("%Y%m%d"), args.top_k)
+                    date.fromisoformat(args.test_start).strftime("%Y%m%d"), end.strftime("%Y%m%d"), args.top_k,
+                    cash_defense=args.cash_defense)
         return
     summaries = []
     for p in _parameter_candidates():
