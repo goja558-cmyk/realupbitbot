@@ -102,6 +102,7 @@ KILL_DAY_LOSS    = -4.0       # 킬 스위치 일일 손실 (-3%→-4% 완화)
 # ── 대피 단계 파라미터 ─────────────────────────────────────
 D1_KOSPI_PCT   = -2.0   # NORMAL→DEFENSE_1 코스피 조건 (-1.5%→-2% 완화)
 D1_PF_PCT      = -3.0   # NORMAL→DEFENSE_1 포트폴리오 수익률 조건 (-2%→-3% 완화)
+NO_BUY_KOSPI_PCT = -1.5 # 장초반 코스피 급락 시 신규 진입 보류 (기존 보유는 유지)
 D2_KOSPI_PCT   = -2.0   # DEFENSE_1→2 코스피 조건
 D2_CONSEC      = 2      # DEFENSE_1→2 연속하락일 조건
 D3_KOSPI_PCT   = -3.0   # DEFENSE_2→3 코스피 조건
@@ -2224,10 +2225,10 @@ def is_tradeable_time(for_buy=True):
 
 
 def is_kospi_no_trade():
-    """코스피 -3% 이하만 신규 매수 금지 (+3% 급등은 허용)"""
+    """KOSPI가 급락한 날에는 신규 매수만 보류하고 기존 보유는 유지한다."""
     chg = get_kospi_change_pct()
-    if chg <= -3.0:
-        cprint(f"[No Trade Zone] 코스피 {chg:+.1f}%", Fore.YELLOW)
+    if chg <= NO_BUY_KOSPI_PCT:
+        cprint(f"[신규 진입 보류] 코스피 {chg:+.1f}%", Fore.YELLOW)
         return True
     return False
 
@@ -2752,6 +2753,11 @@ def monitor_positions():
 def _do_rebalance():
     """모멘텀 기반 ETF 교체 — NORMAL 상태에서만 실행"""
     global portfolio
+
+    # 급락일에는 리밸런싱 매도·매수를 모두 건너뛴다. 기존 포지션은 별도 손절/트레일링만 적용된다.
+    if is_kospi_no_trade():
+        send_msg(f"⚠️ 코스피 급락({get_kospi_change_pct():+.1f}%) — 오늘 신규 진입을 보류합니다.", force=True)
+        return
 
     # 모든 호출 경로(스케줄·자동복구·Telegram 수동 명령)에 동일한 매수 시간과
     # 금요일 신규매수 제한을 적용한다.

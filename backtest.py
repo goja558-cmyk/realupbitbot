@@ -306,7 +306,7 @@ def _score_on_day(data: dict[str, list[dict]], code: str, day: str, p: Params) -
 
 
 def simulate(data: dict[str, list[dict]], p: Params, start: str, end: str, initial_cash=1_000_000,
-             cash_defense: bool = False) -> tuple[dict, list[dict], list[dict]]:
+             cash_defense: bool = False, gap_entry_block: bool = False) -> tuple[dict, list[dict], list[dict]]:
     """전일 종가 신호 → 당일 시가 체결. 월초 전면, 매주 월요일 하위 교체 대신
     매주 월요일 목표 바스켓으로 조정한다. 방어/인버스는 별도 검증 대상이라 포함하지 않는다."""
     calendar = sorted({r["date"] for rows in data.values() for r in rows if start <= r["date"] <= end})
@@ -317,8 +317,9 @@ def simulate(data: dict[str, list[dict]], p: Params, start: str, end: str, initi
     peak, max_dd = cash, 0.0
     prior_equity = cash
     defense_active = False
-    defense_events = {"daily_kill": 0, "mdd_kill": 0, "kospi_defense": 0, "cash_defense_days": 0}
-    kospi = {r["date"]: r for r in _read_csv(KOSPI_CACHE_CODE)} if cash_defense else {}
+    defense_events = {"daily_kill": 0, "mdd_kill": 0, "kospi_defense": 0, "cash_defense_days": 0,
+                      "gap_entry_block_days": 0}
+    kospi = {r["date"]: r for r in _read_csv(KOSPI_CACHE_CODE)} if (cash_defense or gap_entry_block) else {}
     fee = p.fee_bps / 10_000
 
     def sell(code, bar, reason):
@@ -372,7 +373,17 @@ def simulate(data: dict[str, list[dict]], p: Params, start: str, end: str, initi
                 if dt.weekday() == 0 and kospi_return >= 0.5 and k["close"] >= ma5 and (not avg_value or k["value"] >= avg_value * 1.1):
                     defense_active = False
 
-        if not defense_active and dt.weekday() == 0 and n > 0:
+        # 실전과 같은 급락일 신규진입 보류: KOSPI 시가가 전일 종가보다 1.5% 이상 낮으면
+        # 리밸런싱 매도/매수를 모두 건너뛰고, 기존 보유는 손절·트레일링으로만 관리한다.
+        entry_blocked = False
+        if gap_entry_block and n:
+            k_open, k_prev = kospi.get(d), kospi.get(calendar[n - 1])
+            if k_open and k_prev and k_prev["close"]:
+                entry_blocked = (k_open["open"] / k_prev["close"] - 1) * 100 <= -1.5
+        if entry_blocked and dt.weekday() == 0:
+            defense_events["gap_entry_block_days"] += 1
+
+        if not defense_active and not entry_blocked and dt.weekday() == 0 and n > 0:
             target, overheat = _select(data, calendar[n - 1], p, cooldown)
             current = list(pos)
             is_monthly = dt.day <= 7
@@ -480,7 +491,7 @@ def simulate(data: dict[str, list[dict]], p: Params, start: str, end: str, initi
                "estimated_cost_20bps_krw": round(gross_notional * 0.002, 2),
                "estimated_cost_30bps_krw": round(gross_notional * 0.003, 2),
                "reentry_within_14d": quick_reentries, "stop_reentry_within_14d": stop_reentries,
-               "cash_defense": cash_defense, **defense_events,
+               "cash_defense": cash_defense, "gap_entry_block": gap_entry_block, **defense_events,
                "limitations": "일봉 기반: 장중 고가/저가 순서는 알 수 없어 트레일은 전일까지 확정된 고점만 사용. cash_defense는 킬스위치/MDD/KOSPI 디펜스를 종가 전량 현금화와 다음 월요일 재진입으로 근사한다. 인버스·장중 체결·호가 스프레드는 미포함. 현 유니버스의 신규 상장 종목 때문에 2025년 이전 동일 유니버스 검증은 불가.", **p.__dict__}
     return summary, trades, curve
 
@@ -514,16 +525,18 @@ def _quality(summary: dict) -> float:
 
 
 def walkforward(data: dict[str, list[dict]], train_start: str, train_end: str, test_start: str, test_end: str, top_k: int,
-                cash_defense: bool = False):
+                cash_defense: bool = False, gap_entry_block: bool = False):
     in_sample = []
     for p in _parameter_candidates():
-        result, _, _ = simulate(data, p, train_start, train_end, cash_defense=cash_defense)
+        result, _, _ = simulate(data, p, train_start, train_end, cash_defense=cash_defense,
+                                gap_entry_block=gap_entry_block)
         result["selection_score"] = round(_quality(result), 4)
         in_sample.append((result, p))
     in_sample.sort(key=lambda x: x[0]["selection_score"], reverse=True)
     rows = []
     for rank, (ins, p) in enumerate(in_sample[:top_k], 1):
-        oos, _, _ = simulate(data, p, test_start, test_end, cash_defense=cash_defense)
+        oos, _, _ = simulate(data, p, test_start, test_end, cash_defense=cash_defense,
+                             gap_entry_block=gap_entry_block)
         rows.append({
             "rank_in_sample": rank, "selection_score": ins["selection_score"],
             "is_cagr_pct": ins["cagr_pct"], "is_mdd_pct": ins["mdd_pct"], "is_trade_count": ins["trade_count"],
@@ -550,12 +563,16 @@ def main():
         if name == "walkforward":
             s.add_argument("--cash-defense", action="store_true",
                            help="Include daily cash-defense approximation")
+            s.add_argument("--gap-entry-block", action="store_true",
+                           help="Block Monday rebalancing after a KOSPI gap down")
             s.add_argument("--train-end", default="2025-12-31")
             s.add_argument("--test-start", default="2026-01-01")
             s.add_argument("--top-k", type=int, default=5)
         elif name == "run":
             s.add_argument("--cash-defense", action="store_true",
                            help="Include daily cash-defense approximation")
+            s.add_argument("--gap-entry-block", action="store_true",
+                           help="Block Monday rebalancing after a KOSPI gap down")
     args = ap.parse_args()
     validate_universe()
     start, end = date.fromisoformat(args.start), date.fromisoformat(args.end)
@@ -567,12 +584,12 @@ def main():
         raise SystemExit("데이터 없음: " + ", ".join(missing) + "\n먼저: python3 backtest.py fetch --start " + args.start)
     if args.cmd == "run":
         _save_result(*simulate(data, Params(fee_bps=args.fee_bps), start.strftime("%Y%m%d"), end.strftime("%Y%m%d"),
-                               cash_defense=args.cash_defense))
+                               cash_defense=args.cash_defense, gap_entry_block=args.gap_entry_block))
         return
     if args.cmd == "walkforward":
         walkforward(data, start.strftime("%Y%m%d"), date.fromisoformat(args.train_end).strftime("%Y%m%d"),
                     date.fromisoformat(args.test_start).strftime("%Y%m%d"), end.strftime("%Y%m%d"), args.top_k,
-                    cash_defense=args.cash_defense)
+                    cash_defense=args.cash_defense, gap_entry_block=args.gap_entry_block)
         return
     summaries = []
     for p in _parameter_candidates():
