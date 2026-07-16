@@ -69,3 +69,15 @@ python3 us_stock_backtest.py run --start 2018-01-01 --end 2026-07-15 --fee-bps 2
 
 The fixed large-cap universe has survivorship bias. Treat results only as a
 first API/strategy sanity check, not as evidence for live trading.
+
+## Four-stock observer (no orders)
+
+`watchlist_observer.py` observes Dongjin Semichem, Silicon2, Classys, and JYP
+Ent. It has no order endpoint or automatic trading function. It records
+one-minute snapshots from 10:00 to 14:20 KST and five-minute snapshots near
+the open and close. Raw files are kept in `data/watchlist_observer/`.
+
+```bash
+python3 watchlist_observer.py --once
+python3 watchlist_observer.py --daemon
+```
