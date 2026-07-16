@@ -1159,7 +1159,9 @@ def get_price_info(code):
 def get_daily_chart(code, n_days=70):
     """일봉 종가 + 거래대금 리스트 반환 (오래된 것 먼저)
     반환: (closes, vol_krw_list) 튜플"""
-    h = kis_headers("FHKST01010400")
+    # FHKST01010400은 '현재가 일자별'로 약 30건만 반환한다.
+    # 기간별 차트 엔드포인트에는 FHKST03010100을 사용해야 60일 모멘텀 이상을 확보한다.
+    h = kis_headers("FHKST03010100")
     if not h:
         return [], []
 

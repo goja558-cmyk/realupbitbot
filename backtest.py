@@ -142,7 +142,9 @@ def fetch_code(code: str, start: date, end: date, token: str, cfg: dict) -> int:
         "content-type": "application/json; charset=utf-8",
         "authorization": f"Bearer {token}",
         "appkey": cfg["app_key"], "appsecret": cfg["app_secret"],
-        "tr_id": "FHKST01010400",
+        # FHKST01010400은 최신 약 30건용이다. 이 URL의 기간별 차트 TR ID는
+        # FHKST03010100이며, 과거 데이터 수집에 사용해야 한다.
+        "tr_id": "FHKST03010100",
     }
     cursor = end
     while cursor >= start:
