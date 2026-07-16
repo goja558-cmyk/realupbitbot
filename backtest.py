@@ -332,6 +332,7 @@ def simulate(data: dict[str, list[dict]], p: Params, start: str, end: str, initi
     peak, max_dd = cash, 0.0
     prior_equity = cash
     defense_active = False
+    risk_lock_active = False
     defense_events = {"daily_kill": 0, "mdd_kill": 0, "kospi_defense": 0, "cash_defense_days": 0,
                       "gap_entry_block_days": 0}
     kospi = {r["date"]: r for r in _read_csv(KOSPI_CACHE_CODE)} if (cash_defense or gap_entry_block) else {}
@@ -389,6 +390,11 @@ def simulate(data: dict[str, list[dict]], p: Params, start: str, end: str, initi
                 if kospi_return >= 0.5 and k["close"] >= ma5 and (not avg_value or k["value"] >= avg_value * 1.1):
                     defense_active = False
                     resume_rebalance = True
+                    # 실전 check_auto_risk_recovery와 동일하게 킬/MDD 대피 뒤에는
+                    # 복귀 시점 계좌값을 새 peak로 삼아 같은 과거 낙폭을 반복 발동시키지 않는다.
+                    if risk_lock_active:
+                        peak = cash
+                        risk_lock_active = False
 
         # 실전과 같은 급락일 신규진입 보류: KOSPI 시가가 전일 종가보다 1.5% 이상 낮으면
         # 리밸런싱 매도/매수를 모두 건너뛰고, 기존 보유는 손절·트레일링으로만 관리한다.
@@ -478,6 +484,8 @@ def simulate(data: dict[str, list[dict]], p: Params, start: str, end: str, initi
                 pos.pop(code)
             equity = cash
             defense_active = True
+            if trigger in ("daily_kill", "mdd_kill"):
+                risk_lock_active = True
             defense_events[trigger] += 1
         peak = max(peak, equity)
         max_dd = min(max_dd, (equity / peak - 1) * 100)
