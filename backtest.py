@@ -372,21 +372,29 @@ def simulate(data: dict[str, list[dict]], p: Params, start: str, end: str, initi
 
     years = max(1 / 252, len(calendar) / 252)
     final = curve[-1]["equity"] if curve else initial_cash
-    sell_dates, quick_reentries = {}, 0
+    sell_dates, stop_dates, quick_reentries, stop_reentries = {}, {}, 0, 0
     for trade in trades:
         code = trade["code"]
         trade_day = datetime.strptime(trade["date"], "%Y%m%d").date()
         if trade["side"] == "SELL":
             sell_dates[code] = trade_day
+            if trade["reason"] == "stop_loss":
+                stop_dates[code] = trade_day
         elif code in sell_dates and (trade_day - sell_dates[code]).days <= 14:
             quick_reentries += 1
+            if code in stop_dates and (trade_day - stop_dates[code]).days <= 14:
+                stop_reentries += 1
     gross_notional = sum(float(t["price"]) * int(t["qty"]) for t in trades)
     summary = {"start": start, "end": end, "trading_days": len(calendar), "initial_cash": initial_cash,
                "final_equity": round(final, 2), "total_return_pct": round((final / initial_cash - 1) * 100, 3),
                "cagr_pct": round(((final / initial_cash) ** (1 / years) - 1) * 100, 3), "mdd_pct": round(max_dd, 3),
-               "trade_count": len(trades), "estimated_cost_krw": round(gross_notional * fee, 2),
-               "reentry_within_14d": quick_reentries,
-               "limitations": "일봉 기반: 장중 고가/저가 순서는 알 수 없어 트레일은 전일까지 확정된 고점만 사용. 호가 스프레드와 KOSPI 방어/인버스는 미포함.", **p.__dict__}
+               "trade_count": len(trades), "turnover_pct_initial": round(gross_notional / initial_cash * 100, 2),
+               "estimated_cost_krw": round(gross_notional * fee, 2),
+               "estimated_cost_pct_initial": round(gross_notional * fee / initial_cash * 100, 3),
+               "estimated_cost_20bps_krw": round(gross_notional * 0.002, 2),
+               "estimated_cost_30bps_krw": round(gross_notional * 0.003, 2),
+               "reentry_within_14d": quick_reentries, "stop_reentry_within_14d": stop_reentries,
+               "limitations": "일봉 기반: 장중 고가/저가 순서는 알 수 없어 트레일은 전일까지 확정된 고점만 사용. 호가 스프레드와 KOSPI 방어/인버스는 미포함. 현 유니버스의 신규 상장 종목 때문에 2025년 이전 동일 유니버스 검증은 불가.", **p.__dict__}
     return summary, trades, curve
 
 
@@ -404,13 +412,57 @@ def _save_result(summary, trades, curve, prefix="run"):
     print(f"결과 저장: {base}_summary.json / _trades.csv / _equity.csv")
 
 
+def _parameter_candidates():
+    """폭을 넓히기보다 인접한 합리적 후보만 비교한다. 데이터 스누핑을 줄이기 위함."""
+    for short, long, top_n, stop, ts, gap in itertools.product(
+        (10, 20, 30), (40, 60, 90), (3, 5), (-3.0, -5.0, -7.0), (4.0, 6.0, 8.0), (2.0, 3.0)
+    ):
+        if short < long:
+            yield Params(short=short, long=long, top_n=top_n, stop_loss=stop, trail_start=ts, trail_gap=gap)
+
+
+def _quality(summary: dict) -> float:
+    """수익률 하나가 아니라 MDD를 강하게 벌점으로 준 선택 점수."""
+    return summary["cagr_pct"] / max(abs(summary["mdd_pct"]), 1.0)
+
+
+def walkforward(data: dict[str, list[dict]], train_start: str, train_end: str, test_start: str, test_end: str, top_k: int):
+    in_sample = []
+    for p in _parameter_candidates():
+        result, _, _ = simulate(data, p, train_start, train_end)
+        result["selection_score"] = round(_quality(result), 4)
+        in_sample.append((result, p))
+    in_sample.sort(key=lambda x: x[0]["selection_score"], reverse=True)
+    rows = []
+    for rank, (ins, p) in enumerate(in_sample[:top_k], 1):
+        oos, _, _ = simulate(data, p, test_start, test_end)
+        rows.append({
+            "rank_in_sample": rank, "selection_score": ins["selection_score"],
+            "is_cagr_pct": ins["cagr_pct"], "is_mdd_pct": ins["mdd_pct"], "is_trade_count": ins["trade_count"],
+            "oos_cagr_pct": oos["cagr_pct"], "oos_mdd_pct": oos["mdd_pct"], "oos_total_return_pct": oos["total_return_pct"],
+            "oos_trade_count": oos["trade_count"], **p.__dict__,
+        })
+    RESULT_DIR.mkdir(parents=True, exist_ok=True)
+    path = RESULT_DIR / f"walkforward_{datetime.now():%Y%m%d_%H%M%S}.csv"
+    with path.open("w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(rows[0])); writer.writeheader(); writer.writerows(rows)
+    print(f"워크포워드 결과: {path}")
+    for row in rows:
+        print(row)
+
+
 def main():
     ap = argparse.ArgumentParser(description="KIS 일봉 전용 백테스트 — 주문 API 미사용")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name in ("fetch", "run", "grid"):
+    for name in ("fetch", "run", "grid", "walkforward"):
         s = sub.add_parser(name)
         s.add_argument("--start", default="2023-01-01")
         s.add_argument("--end", default=date.today().isoformat())
+        s.add_argument("--fee-bps", type=float, default=10.0, help="편도 비용+슬리피지 가정 (기본 10bp)")
+        if name == "walkforward":
+            s.add_argument("--train-end", default="2025-12-31")
+            s.add_argument("--test-start", default="2026-01-01")
+            s.add_argument("--top-k", type=int, default=5)
     args = ap.parse_args()
     validate_universe()
     start, end = date.fromisoformat(args.start), date.fromisoformat(args.end)
@@ -421,13 +473,15 @@ def main():
     if missing:
         raise SystemExit("데이터 없음: " + ", ".join(missing) + "\n먼저: python3 backtest.py fetch --start " + args.start)
     if args.cmd == "run":
-        _save_result(*simulate(data, Params(), start.strftime("%Y%m%d"), end.strftime("%Y%m%d")))
+        _save_result(*simulate(data, Params(fee_bps=args.fee_bps), start.strftime("%Y%m%d"), end.strftime("%Y%m%d")))
+        return
+    if args.cmd == "walkforward":
+        walkforward(data, start.strftime("%Y%m%d"), date.fromisoformat(args.train_end).strftime("%Y%m%d"),
+                    date.fromisoformat(args.test_start).strftime("%Y%m%d"), end.strftime("%Y%m%d"), args.top_k)
         return
     summaries = []
-    for short, long, top_n, stop, ts, gap in itertools.product((10, 20, 30), (40, 60, 90), (3, 5), (-3.0, -5.0, -7.0), (4.0, 6.0), (2.0, 3.0)):
-        if short >= long:
-            continue
-        summary, _, _ = simulate(data, Params(short=short, long=long, top_n=top_n, stop_loss=stop, trail_start=ts, trail_gap=gap), start.strftime("%Y%m%d"), end.strftime("%Y%m%d"))
+    for p in _parameter_candidates():
+        summary, _, _ = simulate(data, p, start.strftime("%Y%m%d"), end.strftime("%Y%m%d"))
         summaries.append(summary)
     summaries.sort(key=lambda x: (x["cagr_pct"] + x["mdd_pct"] * 0.5), reverse=True)
     RESULT_DIR.mkdir(parents=True, exist_ok=True)
