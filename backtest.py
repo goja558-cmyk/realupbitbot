@@ -348,6 +348,7 @@ def simulate(data: dict[str, list[dict]], p: Params, start: str, end: str, initi
     for n, d in enumerate(calendar):
         bars = {c: by_day[c].get(d) for c in data}
         dt = datetime.strptime(d, "%Y%m%d").date()
+        resume_rebalance = False
         # 장중 손절/트레일: 일봉에서는 고가·저가 순서를 모르므로 보수적으로 판단.
         for code in list(pos):
             bar = bars.get(code)
@@ -385,8 +386,9 @@ def simulate(data: dict[str, list[dict]], p: Params, start: str, end: str, initi
                 avg_value = sum(x["value"] for x in k5) / len(k5)
                 prev_close = k5[-2]["close"] if len(k5) >= 2 else k["close"]
                 kospi_return = (k["close"] / prev_close - 1) * 100 if prev_close else 0
-                if dt.weekday() == 0 and kospi_return >= 0.5 and k["close"] >= ma5 and (not avg_value or k["value"] >= avg_value * 1.1):
+                if kospi_return >= 0.5 and k["close"] >= ma5 and (not avg_value or k["value"] >= avg_value * 1.1):
                     defense_active = False
+                    resume_rebalance = True
 
         # 실전과 같은 급락일 신규진입 보류: KOSPI 시가가 전일 종가보다 1.5% 이상 낮으면
         # 리밸런싱 매도/매수를 모두 건너뛰고, 기존 보유는 손절·트레일링으로만 관리한다.
@@ -398,14 +400,14 @@ def simulate(data: dict[str, list[dict]], p: Params, start: str, end: str, initi
         if entry_blocked and dt.weekday() == 0:
             defense_events["gap_entry_block_days"] += 1
 
-        if not defense_active and not entry_blocked and dt.weekday() == 0 and n > 0:
+        if not defense_active and not entry_blocked and (dt.weekday() == 0 or resume_rebalance) and n > 0:
             target, overheat = _select(data, calendar[n - 1], p, cooldown)
             current = list(pos)
             is_monthly = dt.day <= 7
-            if is_monthly:
+            if is_monthly or resume_rebalance:
                 desired = target
                 to_sell = [c for c in current if c not in desired]
-                reason = "monthly_rebalance"
+                reason = "defense_resume" if resume_rebalance else "monthly_rebalance"
             else:
                 desired = list(current)
                 held_scores = sorted(
