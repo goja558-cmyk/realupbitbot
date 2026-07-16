@@ -210,15 +210,45 @@ def _score(rows: list[dict], at: int, p: Params) -> float | None:
     return p.short_weight * (now / s - 1) * 100 + (1 - p.short_weight) * (now / l - 1) * 100
 
 
-def _select(data: dict[str, list[dict]], day: str, p: Params) -> list[str]:
+def _ret(rows: list[dict], at: int, days: int) -> float:
+    if at < days or rows[at - days]["close"] <= 0:
+        return 0.0
+    return (rows[at]["close"] / rows[at - days]["close"] - 1) * 100
+
+
+def _select(data: dict[str, list[dict]], day: str, p: Params, cooldown: dict[str, date]) -> tuple[list[str], set[str]]:
+    """실전과 같은 점수 하한·쿨다운·거래대금·과열 필터를 적용한다."""
     ranked = []
+    overheat = set()
+    signal_day = datetime.strptime(day, "%Y%m%d").date()
     for code, rows in data.items():
         idx = next((i for i, r in enumerate(rows) if r["date"] == day), None)
         if idx is None:
             continue
+        ret20 = _ret(rows, idx, 20)
+        # 실전 is_cooldown: 20일 수익률이 양전환하면 조기 해제, 아니면 만료일까지 제외
+        until = cooldown.get(code)
+        if until:
+            if ret20 > 0:
+                del cooldown[code]
+            elif signal_day <= until:
+                continue
+            else:
+                del cooldown[code]
+        # 실전 register_cooldown_if_needed와 같은 -10% 20일 하락 쿨다운
+        if ret20 <= -10.0:
+            cooldown[code] = signal_day + timedelta(days=p.cooldown_days)
+            continue
         score = _score(rows, idx, p)
-        if score is not None and score > -5.0:
-            ranked.append((score, code))
+        if score is None or score <= -5.0:
+            continue
+        # 실전의 상대 유동성 필터: 당일 거래대금이 최근 20일 평균의 30% 미만이면 제외.
+        recent_values = [r["value"] for r in rows[max(0, idx - 19):idx + 1] if r["value"] > 0]
+        if recent_values and rows[idx]["value"] < (sum(recent_values) / len(recent_values)) * 0.3:
+            continue
+        if _ret(rows, idx, 5) > p.overheat_pct:
+            overheat.add(code)
+        ranked.append((score, code))
     tags, chosen = {}, []
     for _, code in sorted(ranked, reverse=True):
         tag = UNIVERSE[code]["tag"]
@@ -228,7 +258,13 @@ def _select(data: dict[str, list[dict]], day: str, p: Params) -> list[str]:
         tags[tag] = tags.get(tag, 0) + 1
         if len(chosen) == p.top_n:
             break
-    return chosen
+    return chosen, overheat
+
+
+def _score_on_day(data: dict[str, list[dict]], code: str, day: str, p: Params) -> float | None:
+    rows = data[code]
+    idx = next((i for i, r in enumerate(rows) if r["date"] == day), None)
+    return _score(rows, idx, p) if idx is not None else None
 
 
 def simulate(data: dict[str, list[dict]], p: Params, start: str, end: str, initial_cash=1_000_000) -> tuple[dict, list[dict], list[dict]]:
@@ -237,6 +273,7 @@ def simulate(data: dict[str, list[dict]], p: Params, start: str, end: str, initi
     calendar = sorted({r["date"] for rows in data.values() for r in rows if start <= r["date"] <= end})
     by_day = {c: {r["date"]: r for r in rows} for c, rows in data.items()}
     cash, pos, trades, curve = float(initial_cash), {}, [], []
+    cooldown = {}
     last_close = {}
     peak, max_dd = cash, 0.0
     fee = p.fee_bps / 10_000
@@ -251,6 +288,7 @@ def simulate(data: dict[str, list[dict]], p: Params, start: str, end: str, initi
 
     for n, d in enumerate(calendar):
         bars = {c: by_day[c].get(d) for c in data}
+        dt = datetime.strptime(d, "%Y%m%d").date()
         # 장중 손절/트레일: 일봉에서는 고가·저가 순서를 모르므로 보수적으로 판단.
         for code in list(pos):
             bar = bars.get(code)
@@ -269,29 +307,60 @@ def simulate(data: dict[str, list[dict]], p: Params, start: str, end: str, initi
                 cash += gross * (1 - fee)
                 reason = "trailing" if trail_px >= stop_px else "stop_loss"
                 pos.pop(code)
+                if reason == "stop_loss":
+                    cooldown[code] = dt + timedelta(days=p.cooldown_days)
                 trades.append({"date": d, "code": code, "name": UNIVERSE[code]["name"], "side": "SELL", "price": round(px, 2), "qty": q, "reason": reason, "pnl_pct": round((px / entry - 1) * 100 - p.fee_bps / 100, 3)})
             elif code in pos:
                 pos[code] = (q, entry, max(high, bar["high"]))
 
-        dt = datetime.strptime(d, "%Y%m%d").date()
-        # 월요일: 직전 거래일 종가만 사용해 목표 바스켓을 계산하고 시가에 조정한다.
+        # 실전 스케줄과 동일하게 첫째 월요일은 전체 교체, 나머지 월요일은 하위 절반만
+        # (후보와의 점수차 2% 이상일 때) 교체한다. 이전 버전의 매주 전체 교체는 회전율을
+        # 과장해 471건이라는 결과를 만들 수 있었다.
         if dt.weekday() == 0 and n > 0:
-            target = _select(data, calendar[n - 1], p)
-            for code in list(pos):
-                if code not in target and bars.get(code):
-                    sell(code, bars[code], "weekly_rebalance")
-            buyable = [c for c in target if c not in pos and bars.get(c) and bars[c]["open"] > 0]
+            target, overheat = _select(data, calendar[n - 1], p, cooldown)
+            current = list(pos)
+            is_monthly = dt.day <= 7
+            if is_monthly:
+                desired = target
+                to_sell = [c for c in current if c not in desired]
+                reason = "monthly_rebalance"
+            else:
+                desired = list(current)
+                held_scores = sorted(
+                    ((c, _score_on_day(data, c, calendar[n - 1], p)) for c in current),
+                    key=lambda x: x[1] if x[1] is not None else float("-inf"),
+                )
+                candidates = [c for c in target if c not in current]
+                to_sell = []
+                for old, old_score in held_scores[:max(1, len(held_scores) // 2)]:
+                    if not candidates or old_score is None:
+                        continue
+                    new = candidates[0]
+                    new_score = _score_on_day(data, new, calendar[n - 1], p)
+                    if new_score is not None and new_score - old_score >= 2.0:
+                        desired.remove(old)
+                        desired.append(new)
+                        to_sell.append(old)
+                        candidates.pop(0)
+                reason = "weekly_rotation"
+            for code in to_sell:
+                if bars.get(code):
+                    sell(code, bars[code], reason)
+            buyable = [c for c in desired if c not in pos and bars.get(c) and bars[c]["open"] > 0]
             equity_now = cash + sum(q * (bars[c]["open"] if bars.get(c) else last_close.get(c, entry)) for c, (q, entry, _) in pos.items())
-            budget = equity_now / max(1, len(target))
+            # 실전의 KOFR 최소 15% 유보를 현금으로 재현한다. KOFR 자체 수익률은 별도 방어
+            # 검증 단계에서 추가한다.
+            budget = equity_now * (1 - p.kofr_reserve) / max(1, len(target))
             for code in buyable:
                 px = bars[code]["open"]
-                qty = int((min(budget, cash) * (1 - fee)) // px)
+                code_budget = budget * 0.5 if code in overheat else budget
+                qty = int((min(code_budget, cash) * (1 - fee)) // px)
                 if qty <= 0:
                     continue
                 cost = qty * px * (1 + fee)
                 cash -= cost
                 pos[code] = (qty, px, px)
-                trades.append({"date": d, "code": code, "name": UNIVERSE[code]["name"], "side": "BUY", "price": round(px, 2), "qty": qty, "reason": "weekly_rebalance", "pnl_pct": ""})
+                trades.append({"date": d, "code": code, "name": UNIVERSE[code]["name"], "side": "BUY", "price": round(px, 2), "qty": qty, "reason": reason, "pnl_pct": ""})
 
         for c, bar in bars.items():
             if bar:
@@ -303,10 +372,21 @@ def simulate(data: dict[str, list[dict]], p: Params, start: str, end: str, initi
 
     years = max(1 / 252, len(calendar) / 252)
     final = curve[-1]["equity"] if curve else initial_cash
+    sell_dates, quick_reentries = {}, 0
+    for trade in trades:
+        code = trade["code"]
+        trade_day = datetime.strptime(trade["date"], "%Y%m%d").date()
+        if trade["side"] == "SELL":
+            sell_dates[code] = trade_day
+        elif code in sell_dates and (trade_day - sell_dates[code]).days <= 14:
+            quick_reentries += 1
+    gross_notional = sum(float(t["price"]) * int(t["qty"]) for t in trades)
     summary = {"start": start, "end": end, "trading_days": len(calendar), "initial_cash": initial_cash,
                "final_equity": round(final, 2), "total_return_pct": round((final / initial_cash - 1) * 100, 3),
                "cagr_pct": round(((final / initial_cash) ** (1 / years) - 1) * 100, 3), "mdd_pct": round(max_dd, 3),
-               "trade_count": len(trades), "limitations": "일봉 기반: 장중 고가/저가 순서는 알 수 없어 트레일은 전일까지 확정된 고점만 사용. KOSPI 방어/인버스는 미포함.", **p.__dict__}
+               "trade_count": len(trades), "estimated_cost_krw": round(gross_notional * fee, 2),
+               "reentry_within_14d": quick_reentries,
+               "limitations": "일봉 기반: 장중 고가/저가 순서는 알 수 없어 트레일은 전일까지 확정된 고점만 사용. 호가 스프레드와 KOSPI 방어/인버스는 미포함.", **p.__dict__}
     return summary, trades, curve
 
 
