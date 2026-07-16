@@ -595,6 +595,11 @@ def simulate_kospi200_trend(start: str, end: str, fee_bps: float = 30.0) -> tupl
     first, last = rows[by_date[calendar[0]]], rows[by_date[calendar[-1]]]
     buy_hold = 1_000_000 / (first["open"] * (1 + fee))
     bh_final = buy_hold * last["close"]
+    bh_peak, bh_mdd = first["open"], 0.0
+    for d in calendar:
+        close = rows[by_date[d]]["close"]
+        bh_peak = max(bh_peak, close)
+        bh_mdd = min(bh_mdd, (close / bh_peak - 1) * 100)
     years = max(1 / 252, len(calendar) / 252)
     gross = sum(t["price"] * t["qty"] for t in trades)
     final = curve[-1]["equity"]
@@ -606,6 +611,7 @@ def simulate_kospi200_trend(start: str, end: str, fee_bps: float = 30.0) -> tupl
                "estimated_cost_krw": round(gross * fee, 2), "fee_bps": fee_bps,
                "buy_hold_total_return_pct": round((bh_final / 1_000_000 - 1) * 100, 3),
                "buy_hold_cagr_pct": round(((bh_final / 1_000_000) ** (1 / years) - 1) * 100, 3),
+               "buy_hold_mdd_pct": round(bh_mdd, 3),
                "exposure_rebalances": exposures,
                "limitations": "나스닥·대장주 필터, 배당 재투자, 장중 킬스위치는 미포함. 전일 종가 신호와 다음 거래일 시가 체결만 사용."}
     return summary, trades, curve
