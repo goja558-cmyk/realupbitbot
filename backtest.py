@@ -579,10 +579,50 @@ def walkforward(data: dict[str, list[dict]], train_start: str, train_end: str, t
         print(row)
 
 
+def rolling_walkforward(data: dict[str, list[dict]], start: date, end: date, train_years: int, test_years: int,
+                        fee_bps: float) -> None:
+    """각 학습 구간에서만 1위를 고른 뒤 바로 다음 구간에 한 번만 적용한다.
+    OOS 결과를 보고 후보를 다시 고르는 데이터 스누핑을 막기 위한 장기 검증이다.
+    """
+    if train_years < 2 or test_years < 1:
+        raise ValueError("train-years는 2 이상, test-years는 1 이상이어야 합니다.")
+    rows = []
+    test_start = date(start.year + train_years, 1, 1)
+    while test_start <= end:
+        test_end = min(date(test_start.year + test_years, 1, 1) - timedelta(days=1), end)
+        train_start = date(test_start.year - train_years, 1, 1)
+        candidates = []
+        for candidate in _parameter_candidates():
+            p = replace(candidate, fee_bps=fee_bps)
+            ins, _, _ = simulate(data, p, train_start.strftime("%Y%m%d"),
+                                  (test_start - timedelta(days=1)).strftime("%Y%m%d"))
+            candidates.append((ins, p))
+        candidates.sort(key=lambda item: _quality(item[0]), reverse=True)
+        ins, p = candidates[0]
+        oos, _, _ = simulate(data, p, test_start.strftime("%Y%m%d"), test_end.strftime("%Y%m%d"))
+        rows.append({
+            "train_start": train_start.isoformat(), "train_end": (test_start - timedelta(days=1)).isoformat(),
+            "test_start": test_start.isoformat(), "test_end": test_end.isoformat(),
+            "selection_score": round(_quality(ins), 4), "is_cagr_pct": ins["cagr_pct"], "is_mdd_pct": ins["mdd_pct"],
+            "oos_cagr_pct": oos["cagr_pct"], "oos_mdd_pct": oos["mdd_pct"],
+            "oos_total_return_pct": oos["total_return_pct"], "oos_trade_count": oos["trade_count"], **p.__dict__,
+        })
+        test_start = test_end + timedelta(days=1)
+    if not rows:
+        raise RuntimeError("롤링 검증 구간이 없습니다. start/end 또는 train-years를 확인하세요.")
+    RESULT_DIR.mkdir(parents=True, exist_ok=True)
+    path = RESULT_DIR / f"rolling_{datetime.now():%Y%m%d_%H%M%S}.csv"
+    with path.open("w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(rows[0])); writer.writeheader(); writer.writerows(rows)
+    print(f"롤링 워크포워드 결과: {path}")
+    for row in rows:
+        print(row)
+
+
 def main():
     ap = argparse.ArgumentParser(description="KIS 일봉 전용 백테스트 — 주문 API 미사용")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name in ("fetch", "run", "grid", "walkforward"):
+    for name in ("fetch", "run", "grid", "walkforward", "rolling"):
         s = sub.add_parser(name)
         s.add_argument("--start", default="2023-01-01")
         s.add_argument("--end", default=date.today().isoformat())
@@ -597,6 +637,9 @@ def main():
             s.add_argument("--train-end", default="2025-12-31")
             s.add_argument("--test-start", default="2026-01-01")
             s.add_argument("--top-k", type=int, default=5)
+        elif name == "rolling":
+            s.add_argument("--train-years", type=int, default=3)
+            s.add_argument("--test-years", type=int, default=1)
         elif name == "run":
             s.add_argument("--cash-defense", action="store_true",
                            help="Include daily cash-defense approximation")
@@ -623,6 +666,9 @@ def main():
         walkforward(data, start.strftime("%Y%m%d"), date.fromisoformat(args.train_end).strftime("%Y%m%d"),
                     date.fromisoformat(args.test_start).strftime("%Y%m%d"), end.strftime("%Y%m%d"), args.top_k,
                     cash_defense=args.cash_defense, gap_entry_block=args.gap_entry_block, fee_bps=args.fee_bps)
+        return
+    if args.cmd == "rolling":
+        rolling_walkforward(data, start, end, args.train_years, args.test_years, args.fee_bps)
         return
     summaries = []
     for candidate in _parameter_candidates():
