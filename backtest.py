@@ -153,7 +153,9 @@ def fetch_code(code: str, start: date, end: date, token: str, cfg: dict) -> int:
             first_payload = payload
         if payload.get("rt_cd") not in (None, "0"):
             raise RuntimeError(f"{code} KIS 오류: {payload.get('msg_cd')} {payload.get('msg1')}")
-        rows = payload.get("output2") or []
+        # KIS 계정/응답 버전에 따라 일봉 배열 키가 output2 또는 output으로 다르다.
+        # 실전 봇과 동일하게 둘 다 지원한다.
+        rows = payload.get("output2") or payload.get("output") or []
         received_rows += len(rows)
         for x in rows:
             try:
@@ -162,7 +164,9 @@ def fetch_code(code: str, start: date, end: date, token: str, cfg: dict) -> int:
                 if d and close > 0:
                     old[d] = {"date": d, "open": float(x.get("stck_oprc") or close),
                               "high": float(x.get("stck_hgpr") or close), "low": float(x.get("stck_lwpr") or close),
-                              "close": close, "value": float(x.get("acml_tr_pbmn") or 0)}
+                              "close": close,
+                              # 일부 응답은 거래대금(acml_tr_pbmn) 대신 거래량(acml_vol)만 준다.
+                              "value": float(x.get("acml_tr_pbmn") or 0) or close * float(x.get("acml_vol") or 0)}
             except (TypeError, ValueError):
                 pass
         cursor = begin - timedelta(days=1)
