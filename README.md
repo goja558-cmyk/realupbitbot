@@ -80,4 +80,10 @@ the open and close. Raw files are kept in `data/watchlist_observer/`.
 ```bash
 python3 watchlist_observer.py --once
 python3 watchlist_observer.py --daemon
+python3 watchlist_observer.py --daily-summary
 ```
+
+After 15:35 KST the daemon refreshes daily bars, writes
+`data/watchlist_observer/daily_summary.csv`, and sends one Telegram close
+summary. A stale-price check marks a day as unusable when intraday price and
+accumulated volume did not change.
