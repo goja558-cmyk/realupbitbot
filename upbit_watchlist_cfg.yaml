@@ -1,0 +1,12 @@
+markets:
+  KRW-BTC: 비트코인
+  KRW-ETH: 이더리움
+  KRW-XRP: 리플
+  KRW-SOL: 솔라나
+  KRW-DOGE: 도지코인
+interval_seconds: 60
+telegram_enabled: true
+telegram_summary_interval_seconds: 900
+# 주식 봇과 다른 새 텔레그램 봇의 BotFather 토큰/채팅방 ID
+telegram_token: ""
+chat_id: ""
