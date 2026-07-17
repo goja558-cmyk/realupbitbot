@@ -287,6 +287,10 @@ def _telegram(text: str, cfg: dict) -> None:
 
 
 def emit_daily_summary(day: date, cfg: dict, observer_cfg: dict, *, force_send: bool = False) -> None:
+    # 주말·공휴일에는 장중 스냅샷 자체가 없으므로 빈 요약/텔레그램을 만들지 않는다.
+    if not any(r.get("session") != "closed" for r in _snapshots_for(day)):
+        print(f"{day} 장중 기록 없음: 휴장 또는 수집 미실행으로 보고 마감 요약을 건너뜁니다.")
+        return
     rows, message = build_daily_summary(day)
     path = _write_daily_summary(rows)
     print(f"일별 요약 저장: {path}")
