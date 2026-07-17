@@ -85,5 +85,45 @@ python3 watchlist_observer.py --daily-summary
 
 After 15:35 KST the daemon refreshes daily bars, writes
 `data/watchlist_observer/daily_summary.csv`, and sends one Telegram close
+
+## Upbit crypto observer (separate Telegram bot)
+
+`upbit_observer.py` polls Upbit's public ticker API only; it never places orders.
+It uses the separate `upbit_watchlist_cfg.yaml`, `data/upbit_observer/`, and
+`shared/upbit_observer_state.json`. Put a new BotFather token and the new chat ID
+in that config; do not reuse the stock bot credentials.
+
+```bash
+python3 upbit_observer.py --once
+python3 upbit_observer.py --daemon
+```
+
+Ubuntu에서 주식 봇과 업비트 봇을 함께 운영하려면 각각 별도 프로세스로 실행합니다.
+업데이트는 저장소에서 pull한 뒤 업비트 프로세스만 재시작하면 됩니다.
+
+```bash
+cd /home/trade/upbit_bot
+git pull --ff-only
+source .venv/bin/activate
+pkill -f 'upbit_observer.py --daemon' || true
+nohup python3 upbit_observer.py --daemon >> logs/upbit_observer.log 2>&1 &
+```
+
+Ubuntu에서 코드 변경 후 GitHub로 올릴 때는 다음처럼 실행합니다.
+
+```bash
+cd /home/trade/upbit_bot
+git add upbit_observer.py README.md requirements.txt
+git commit -m "Add Upbit market observer"
+git push origin main
+```
+
+`upbit_watchlist_cfg.yaml`은 개인 토큰과 새 채팅방 ID가 들어가므로 Git에 올리지 않습니다.
+Ubuntu에서 최초 실행 전에 해당 파일을 직접 만들고 다음 값을 입력하세요.
+
+```yaml
+telegram_token: "업비트 전용 봇 토큰"
+chat_id: "업비트 전용 채팅방 ID"
+```
 summary. A stale-price check marks a day as unusable when intraday price and
 accumulated volume did not change.
