@@ -102,7 +102,11 @@ Ubuntu에서 주식 봇과 업비트 봇을 함께 운영하려면 각각 별도
 업데이트는 저장소에서 pull한 뒤 업비트 프로세스만 재시작하면 됩니다.
 
 ```bash
+<<<<<<< HEAD
 cd /home/trade/upbit6974
+=======
+cd /home/trade/upbit_bot
+>>>>>>> 1c6fce2 (Make repository Upbit-only)
 git pull --ff-only
 source .venv/bin/activate
 pkill -f 'upbit_observer.py --daemon' || true
