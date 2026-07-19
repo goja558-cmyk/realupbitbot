@@ -71,7 +71,7 @@ def orderbook(markets: list[str]) -> dict[str, dict]:
 
 
 def previous_rows() -> dict[str, list[dict]]:
-    path = DATA_DIR / f"snapshots_{datetime.now(KST).strftime('%Y%m')}.csv"
+    path = DATA_DIR / f"snapshots_{datetime.now(KST).strftime('%Y%m')}_v2.csv"
     history: dict[str, list[dict]] = {}
     if path.exists():
         with path.open(encoding="utf-8-sig", newline="") as f:
@@ -117,7 +117,7 @@ def snapshot(cfg: dict) -> list[dict]:
 
 def save(rows: list[dict]) -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    path = DATA_DIR / f"snapshots_{datetime.now().strftime('%Y%m')}.csv"
+    path = DATA_DIR / f"snapshots_{datetime.now(KST).strftime('%Y%m')}_v2.csv"
     with path.open("a", encoding="utf-8-sig", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=FIELDS)
         if f.tell() == 0:
