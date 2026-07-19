@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import logging
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,6 +24,8 @@ STATE_FILE = BASE / "shared" / "upbit_observer_state.json"
 API = "https://api.upbit.com/v1"
 FIELDS = ["timestamp", "market", "name", "price", "change_pct", "change_24h_pct",
           "high_24h", "low_24h", "volume_24h", "value_24h_krw", "bid", "ask", "spread_bps"]
+LOG_DIR = BASE / "logs"
+LOG_FILE = LOG_DIR / "upbit_observer.log"
 
 DEFAULT = {
     "markets": {"KRW-BTC": "비트코인", "KRW-ETH": "이더리움", "KRW-XRP": "리플",
@@ -80,10 +83,12 @@ def save(rows: list[dict]) -> None:
 def send_telegram(text: str, cfg: dict) -> None:
     token, chat_id = str(cfg.get("telegram_token", "")).strip(), str(cfg.get("chat_id", "")).strip()
     if not token or not chat_id:
-        return
+        raise RuntimeError(f"Telegram settings missing in {CFG_FILE}")
     r = requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
                       json={"chat_id": chat_id, "text": text[:4000]}, timeout=15)
     r.raise_for_status()
+    if not r.json().get("ok", False):
+        raise RuntimeError(f"Telegram API error: {r.text[:300]}")
 
 
 def format_summary(rows: list[dict]) -> str:
@@ -99,16 +104,23 @@ def main() -> None:
     group.add_argument("--once", action="store_true")
     group.add_argument("--daemon", action="store_true")
     args = ap.parse_args()
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(filename=LOG_FILE, level=logging.INFO,
+                        format="%(asctime)s %(levelname)s %(message)s")
+    log = logging.getLogger("upbit_observer")
+    log.info("started config=%s mode=%s", CFG_FILE, "daemon" if args.daemon else "once")
     cfg = load_config()
     last_sent = 0.0
     while True:
         try:
             rows = snapshot(cfg)
             save(rows)
+            log.info("snapshot saved: %d markets", len(rows))
             print(format_summary(rows), flush=True)
             now = time.time()
             if cfg.get("telegram_enabled", True) and now - last_sent >= int(cfg["telegram_summary_interval_seconds"]):
                 send_telegram(format_summary(rows), cfg)
+                log.info("telegram sent: chat_id=%s", str(cfg.get("chat_id", "")))
                 last_sent = now
         except Exception as exc:
             print(f"[업비트 오류] {exc}", flush=True)
