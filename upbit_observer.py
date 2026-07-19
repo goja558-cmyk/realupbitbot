@@ -153,13 +153,17 @@ def save(rows: list[dict]) -> None:
 
 def send_telegram(text: str, cfg: dict) -> None:
     token, chat_id = str(cfg.get("telegram_token", "")).strip(), str(cfg.get("chat_id", "")).strip()
+    log = logging.getLogger("upbit_observer.telegram")
+    log.info("telegram send attempt chat_id=%s chars=%d", chat_id, len(text))
     if not token or not chat_id:
+        log.error("telegram send failed reason=missing_credentials")
         raise RuntimeError(f"Telegram settings missing in {CFG_FILE}")
     r = requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
                       json={"chat_id": chat_id, "text": text[:4000]}, timeout=15)
     r.raise_for_status()
     if not r.json().get("ok", False):
         raise RuntimeError(f"Telegram API error: {r.text[:300]}")
+    log.info("telegram send success chat_id=%s status=%s", chat_id, r.status_code)
 
 
 def format_summary(rows: list[dict]) -> str:
