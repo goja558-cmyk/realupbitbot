@@ -13,6 +13,7 @@ import logging
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import requests
 import yaml
@@ -26,6 +27,7 @@ FIELDS = ["timestamp", "market", "name", "price", "change_pct", "change_24h_pct"
           "high_24h", "low_24h", "volume_24h", "value_24h_krw", "bid", "ask", "spread_bps"]
 LOG_DIR = BASE / "logs"
 LOG_FILE = LOG_DIR / "upbit_observer.log"
+KST = ZoneInfo("Asia/Seoul")
 
 DEFAULT = {
     "markets": {"KRW-BTC": "비트코인", "KRW-ETH": "이더리움", "KRW-XRP": "리플",
@@ -56,7 +58,7 @@ def ticker(markets: list[str]) -> list[dict]:
 
 def snapshot(cfg: dict) -> list[dict]:
     markets = list(cfg["markets"])
-    now = datetime.now(timezone.utc).astimezone()
+    now = datetime.now(timezone.utc).astimezone(KST)
     rows = []
     for item in ticker(markets):
         bid = float(item.get("trade_price", 0))  # 공개 ticker에는 호가가 없어 체결가로 기록
@@ -92,7 +94,8 @@ def send_telegram(text: str, cfg: dict) -> None:
 
 
 def format_summary(rows: list[dict]) -> str:
-    lines = ["📊 업비트 시세 관찰 요약"]
+    observed_at = rows[0]["timestamp"] if rows else datetime.now(KST).isoformat(timespec="seconds")
+    lines = [f"📊 업비트 시세 관찰 요약 ({observed_at})"]
     for row in rows:
         lines.append(f"{row['name']} ({row['market']}): {row['price']:,.8g}원 / 24h {row['change_24h_pct']:+.2f}%")
     return "\n".join(lines)
