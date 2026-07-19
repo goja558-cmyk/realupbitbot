@@ -200,7 +200,11 @@ def main() -> None:
             log.info("snapshot saved: %d markets", len(rows))
             print(format_summary(rows), flush=True)
             now = time.time()
-            balances = account_balances()
+            try:
+                balances = account_balances()
+            except Exception as exc:
+                log.exception("balance lookup failed; continuing with market alert: %s", exc)
+                balances = []
             held = [x for x in balances if x.get("currency") != "KRW" and float(x.get("balance", 0) or 0) > 0]
             interval = 900 if held else 21600
             message = format_summary(rows) + (f"\n보유 상태: {len(held)}종목 / 알림 주기: {interval // 60}분" if balances else "\n보유 조회: API 키 미설정")
@@ -209,6 +213,7 @@ def main() -> None:
                 log.info("telegram sent: chat_id=%s", str(cfg.get("chat_id", "")))
                 last_sent = now
         except Exception as exc:
+            log.exception("observer loop failed: %s", exc)
             print(f"[업비트 오류] {exc}", flush=True)
         if args.once:
             break
