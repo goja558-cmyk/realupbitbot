@@ -10,6 +10,7 @@ import argparse
 import csv
 import json
 import logging
+import statistics
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,8 +24,10 @@ CFG_FILE = BASE / "upbit_watchlist_cfg.yaml"
 DATA_DIR = BASE / "data" / "upbit_observer"
 STATE_FILE = BASE / "shared" / "upbit_observer_state.json"
 API = "https://api.upbit.com/v1"
-FIELDS = ["timestamp", "market", "name", "price", "change_pct", "change_24h_pct",
-          "high_24h", "low_24h", "volume_24h", "value_24h_krw", "bid", "ask", "spread_bps"]
+FIELDS = ["timestamp", "market", "name", "price", "change_pct", "change_24h_pct", "opening_price",
+          "pct_from_open", "high_24h", "low_24h", "volume_24h", "value_24h_krw", "value_share_pct",
+          "highest_52_week_price", "lowest_52_week_price", "pct_from_52w_high", "bid", "ask", "spread_bps",
+          "price_delta_since_last", "pct_since_last", "volume_delta_since_last", "rolling_std_20", "ma20", "pct_from_ma20"]
 LOG_DIR = BASE / "logs"
 LOG_FILE = LOG_DIR / "upbit_observer.log"
 KST = ZoneInfo("Asia/Seoul")
@@ -56,19 +59,59 @@ def ticker(markets: list[str]) -> list[dict]:
     return r.json()
 
 
+def orderbook(markets: list[str]) -> dict[str, dict]:
+    r = requests.get(f"{API}/orderbook", params={"markets": ",".join(markets)}, timeout=15)
+    r.raise_for_status()
+    out = {}
+    for item in r.json():
+        units = item.get("orderbook_units") or [{}]
+        top = units[0]
+        out[item["market"]] = {"bid": top.get("bid_price", 0), "ask": top.get("ask_price", 0)}
+    return out
+
+
+def previous_rows() -> dict[str, list[dict]]:
+    path = DATA_DIR / f"snapshots_{datetime.now(KST).strftime('%Y%m')}.csv"
+    history: dict[str, list[dict]] = {}
+    if path.exists():
+        with path.open(encoding="utf-8-sig", newline="") as f:
+            for row in csv.DictReader(f):
+                history.setdefault(row.get("market", ""), []).append(row)
+    return history
+
+
 def snapshot(cfg: dict) -> list[dict]:
     markets = list(cfg["markets"])
     now = datetime.now(timezone.utc).astimezone(KST)
+    books = orderbook(markets)
+    history = previous_rows()
     rows = []
     for item in ticker(markets):
-        bid = float(item.get("trade_price", 0))  # 공개 ticker에는 호가가 없어 체결가로 기록
+        book = books.get(item["market"], {})
+        bid, ask = float(book.get("bid", 0)), float(book.get("ask", 0))
+        prices = [float(x.get("price", 0)) for x in history.get(item["market"], []) if float(x.get("price", 0) or 0)]
+        last = prices[-1] if prices else 0.0
+        recent = (prices + [float(item["trade_price"])])[-20:]
+        ma20 = sum(recent) / len(recent)
+        rolling_std = statistics.pstdev(recent) if len(recent) > 1 else 0.0
+        value = float(item["acc_trade_price_24h"])
         rows.append({"timestamp": now.isoformat(timespec="seconds"), "market": item["market"],
                      "name": cfg["markets"].get(item["market"], item["market"]),
                      "price": item["trade_price"], "change_pct": round((item["trade_price"] / item["prev_closing_price"] - 1) * 100, 3),
                      "change_24h_pct": round(item["signed_change_rate"] * 100, 3),
+                     "opening_price": item["opening_price"], "pct_from_open": round((item["trade_price"] / item["opening_price"] - 1) * 100, 3) if item["opening_price"] else 0,
                      "high_24h": item["high_price"], "low_24h": item["low_price"],
-                     "volume_24h": item["acc_trade_volume_24h"], "value_24h_krw": item["acc_trade_price_24h"],
-                     "bid": bid, "ask": bid, "spread_bps": 0.0})
+                     "volume_24h": item["acc_trade_volume_24h"], "value_24h_krw": value,
+                     "value_share_pct": 0.0, "highest_52_week_price": item.get("highest_52_week_price", 0),
+                     "lowest_52_week_price": item.get("lowest_52_week_price", 0), "pct_from_52w_high": round((item["trade_price"] / item["highest_52_week_price"] - 1) * 100, 3) if item.get("highest_52_week_price") else 0,
+                     "bid": bid, "ask": ask, "spread_bps": round((ask / bid - 1) * 10000, 3) if bid and ask else 0,
+                     "price_delta_since_last": round(float(item["trade_price"]) - last, 8) if last else 0,
+                     "pct_since_last": round((float(item["trade_price"]) / last - 1) * 100, 5) if last else 0,
+                     "volume_delta_since_last": round(float(item["acc_trade_volume_24h"]) - float(history.get(item["market"], [{}])[-1].get("volume_24h", 0) or 0), 8) if history.get(item["market"]) else 0,
+                     "rolling_std_20": round(rolling_std, 8), "ma20": round(ma20, 8), "pct_from_ma20": round((float(item["trade_price"]) / ma20 - 1) * 100, 5) if ma20 else 0})
+    total_value = sum(float(row["value_24h_krw"]) for row in rows)
+    for row in rows:
+        row["value_share_pct"] = round(float(row["value_24h_krw"]) / total_value * 100, 3) if total_value else 0
     return rows
 
 
