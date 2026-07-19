@@ -10,7 +10,11 @@ import argparse
 import csv
 import json
 import logging
+import os
 import statistics
+import uuid
+import hashlib
+import urllib.parse
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,6 +22,7 @@ from zoneinfo import ZoneInfo
 
 import requests
 import yaml
+import jwt
 
 BASE = Path(__file__).resolve().parent
 CFG_FILE = BASE / "upbit_watchlist_cfg.yaml"
@@ -41,7 +46,28 @@ DEFAULT = {
     # 주식 봇과 완전히 별도의 토큰/채팅방을 입력한다.
     "telegram_token": "",
     "chat_id": "",
+    "telegram_summary_interval_seconds": 900,
 }
+
+
+def _load_dotenv() -> None:
+    env = BASE / ".env"
+    if env.exists():
+        for line in env.read_text(encoding="utf-8").splitlines():
+            if "=" in line and not line.lstrip().startswith("#"):
+                key, value = line.split("=", 1)
+                os.environ.setdefault(key.strip(), value.strip().strip('"'))
+
+
+def account_balances() -> list[dict]:
+    access, secret = os.getenv("UPBIT_ACCESS_KEY", ""), os.getenv("UPBIT_SECRET_KEY", "")
+    if not access or not secret:
+        return []
+    payload = {"access_key": access, "nonce": str(uuid.uuid4())}
+    token = jwt.encode(payload, secret, algorithm="HS256")
+    r = requests.get(f"{API}/accounts", headers={"Authorization": f"Bearer {token}"}, timeout=15)
+    r.raise_for_status()
+    return r.json()
 
 
 def load_config() -> dict:
@@ -156,6 +182,7 @@ def main() -> None:
     log = logging.getLogger("upbit_observer")
     log.info("started config=%s mode=%s", CFG_FILE, "daemon" if args.daemon else "once")
     cfg = load_config()
+    _load_dotenv()
     last_sent = 0.0
     while True:
         try:
@@ -164,8 +191,12 @@ def main() -> None:
             log.info("snapshot saved: %d markets", len(rows))
             print(format_summary(rows), flush=True)
             now = time.time()
-            if cfg.get("telegram_enabled", True) and now - last_sent >= int(cfg["telegram_summary_interval_seconds"]):
-                send_telegram(format_summary(rows), cfg)
+            balances = account_balances()
+            held = [x for x in balances if x.get("currency") != "KRW" and float(x.get("balance", 0) or 0) > 0]
+            interval = 900 if held else 21600
+            message = format_summary(rows) + (f"\n보유 상태: {len(held)}종목 / 알림 주기: {interval // 60}분" if balances else "\n보유 조회: API 키 미설정")
+            if cfg.get("telegram_enabled", True) and now - last_sent >= interval:
+                send_telegram(message, cfg)
                 log.info("telegram sent: chat_id=%s", str(cfg.get("chat_id", "")))
                 last_sent = now
         except Exception as exc:
