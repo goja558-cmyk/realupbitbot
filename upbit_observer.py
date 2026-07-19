@@ -183,6 +183,11 @@ def main() -> None:
     log.info("started config=%s mode=%s", CFG_FILE, "daemon" if args.daemon else "once")
     cfg = load_config()
     _load_dotenv()
+    try:
+        send_telegram("✅ 업비트 감시 봇 정상 작동 중\n시세 수집을 시작했습니다.", cfg)
+        log.info("startup telegram sent")
+    except Exception as exc:
+        log.exception("startup telegram failed: %s", exc)
     last_sent = 0.0
     while True:
         try:
